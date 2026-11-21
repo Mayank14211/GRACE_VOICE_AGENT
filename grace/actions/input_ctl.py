@@ -70,6 +70,17 @@ class ScrollArgs(ActionArgs):
         return max(1, min(50, v))
 
 
+class MoveArgs(ActionArgs):
+    """Absolute screen position in pixels (primary screen, top-left = 0, 0)."""
+
+    x: int = Field(ge=0, le=20000)
+    y: int = Field(ge=0, le=20000)
+
+
+class ButtonArgs(ActionArgs):
+    button: Literal["left", "right", "middle"] = "left"
+
+
 class TextArgs(ActionArgs):
     text: str = Field(min_length=1, max_length=5000)
 
@@ -97,6 +108,9 @@ class InputBackend(Protocol):
     def scroll(self, amount: int) -> None: ...
     def write(self, text: str) -> None: ...
     def hotkey(self, *keys: str) -> None: ...
+    def move_to(self, x: int, y: int) -> None: ...
+    def mouse_down(self, button: str) -> None: ...
+    def mouse_up(self, button: str) -> None: ...
 
 
 class ClipboardBackend(Protocol):
@@ -125,6 +139,24 @@ class PyAutoGuiInput:
             self._gui.press(keys[0])
         else:
             self._gui.hotkey(*keys)
+
+    # Pointer calls skip pyautogui's PAUSE: gestures send up to 30 moves a second.
+    def move_to(self, x: int, y: int) -> None:
+        self._gui.moveTo(x, y, _pause=False)
+
+    def mouse_down(self, button: str) -> None:
+        self._gui.mouseDown(button=button, _pause=False)
+
+    def mouse_up(self, button: str) -> None:
+        self._gui.mouseUp(button=button, _pause=False)
+
+
+def primary_screen_size() -> tuple[int, int]:
+    """Primary screen size in physical pixels (pyautogui makes the process DPI-aware)."""
+    import pyautogui
+
+    width, height = pyautogui.size()
+    return int(width), int(height)
 
 
 class PyperclipClipboard:
@@ -160,6 +192,23 @@ def register_input_actions(
         sign = 1 if args.direction == "up" else -1
         keyboard_mouse.scroll(sign * args.notches * WHEEL_DELTA)
         return ActionResult(True, f"Scrolled {args.direction}.", {"notches": args.notches})
+
+    @registry.register(
+        "input.move_to", MoveArgs, description="Move the mouse pointer to x, y.", quiet=True
+    )
+    def move_to(args: MoveArgs) -> ActionResult:
+        keyboard_mouse.move_to(args.x, args.y)
+        return ActionResult(True, "Moved.")
+
+    @registry.register("input.mouse_down", ButtonArgs, description="Press and hold a mouse button.")
+    def mouse_down(args: ButtonArgs) -> ActionResult:
+        keyboard_mouse.mouse_down(args.button)
+        return ActionResult(True, f"Holding the {args.button} button.")
+
+    @registry.register("input.mouse_up", ButtonArgs, description="Release a mouse button.")
+    def mouse_up(args: ButtonArgs) -> ActionResult:
+        keyboard_mouse.mouse_up(args.button)
+        return ActionResult(True, f"Released the {args.button} button.")
 
     @registry.register("input.type", TextArgs, description="Type text at the cursor.")
     def type_text(args: TextArgs) -> ActionResult:

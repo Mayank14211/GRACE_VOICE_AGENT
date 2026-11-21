@@ -54,8 +54,11 @@ BILLING_NOTICE = (
     "the free tier doesn't include it."
 )
 
-# Actions the model may never call, on top of every risky action.
-LLM_EXCLUDED_ACTIONS = frozenset({"screen.show_image"})
+# Actions the model may never call, on top of every risky action. The pointer primitives are for
+# gestures: the model can't see the screen, and a held button must always be released.
+LLM_EXCLUDED_ACTIONS = frozenset(
+    {"screen.show_image", "input.move_to", "input.mouse_down", "input.mouse_up"}
+)
 _SCHEMA_KEYS = frozenset(
     {"type", "description", "enum", "properties", "required", "items", "minimum", "maximum"}
 )
