@@ -124,3 +124,14 @@ def test_settings_valid_and_invalid(tmp_path: Path) -> None:
     [result] = doctor.check_settings(path, tmp_path / ".env")
     assert result.status == doctor.FAIL
     assert "inference.threads" in result.detail
+
+
+def test_grammar_check_passes() -> None:
+    result = doctor.check_grammar()
+    assert result.status == doctor.PASS, result.detail
+    assert "system.shutdown" in result.detail
+
+
+def test_doctor_imports_new_layers() -> None:
+    names = {module for module, _, _ in doctor.IMPORTS}
+    assert {"grace.actions", "grace.intent.grammar"} <= names
