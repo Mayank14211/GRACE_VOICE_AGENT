@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from grace import config
-from grace.config import ConfigError, Settings, load_settings
+from grace.config import DEFAULT_GESTURE_MAP, ConfigError, Settings, load_settings
 
 ROOT = Path(__file__).resolve().parent.parent
 # Built at runtime so the repo secret scan never sees a key-shaped literal.
@@ -115,6 +115,14 @@ language: auto
     assert s.language == "auto"
 
 
+def test_gesture_map_defaults_and_partial_override(tmp_path: Path) -> None:
+    default = load(tmp_path, "").gestures.map
+    assert default == DEFAULT_GESTURE_MAP and len(default) == 8
+    s = load(tmp_path, "gestures:\n  map: {three_up: none, fist: neutral}\n")
+    assert s.gestures.map["three_up"] == "none" and s.gestures.map["fist"] == "neutral"
+    assert s.gestures.map["index_up"] == "cursor"  # left out -> default kept
+
+
 def test_demo_mode_pins_local(tmp_path: Path) -> None:
     s = load(
         tmp_path,
@@ -138,6 +146,10 @@ def test_demo_mode_pins_local(tmp_path: Path) -> None:
         ("hotkeys: {mic_toggle: ctrl+alt+g}", "both"),
         ("hotkeys: {mic_toggle: 'ctrl++m'}", "empty key"),
         ("gestures: {deadzone: 2}", "gestures.deadzone"),
+        ("gestures: {map: {thumbs_up: cursor}}", "gestures.map"),
+        ("gestures: {map: {fist: shutdown}}", "gestures.map"),
+        ("gestures: {pinch_on: 0.3, pinch_off: 0.2}", "pinch_off"),
+        ("gestures: {max_os_calls_per_s: 30}", "gestures.max_os_calls_per_s"),
         ("language: fr", "language"),
         ("- just\n- a list", "mapping"),
         ("inference: {threads: [", "not valid YAML"),

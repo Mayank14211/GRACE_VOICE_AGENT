@@ -116,13 +116,79 @@ class GeminiSettings(_Section):
     memory_reset_s: float = Field(600.0, ge=0.0, le=86400.0)
 
 
+GesturePose = Literal[
+    "open_palm",
+    "fist",
+    "index_up",
+    "two_up",
+    "three_up",
+    "thumb_index_middle",
+    "pinch_index",
+    "pinch_middle",
+]
+GestureBehaviour = Literal[
+    "cursor",
+    "left_click",
+    "right_click",
+    "scroll",
+    "volume",
+    "brightness",
+    "pause",
+    "neutral",
+    "none",
+]
+# docs/PLAN.md section 7. Behaviours: see grace/input/gestures/controller.py.
+DEFAULT_GESTURE_MAP: dict[str, str] = {
+    "index_up": "cursor",
+    "pinch_index": "left_click",
+    "pinch_middle": "right_click",
+    "two_up": "scroll",
+    "three_up": "brightness",
+    "thumb_index_middle": "volume",
+    "fist": "pause",
+    "open_palm": "neutral",
+}
+
+
 class GestureSettings(_Section):
     camera_index: int = Field(0, ge=0)
+    frame_width: int = Field(640, ge=160, le=1920)
+    frame_height: int = Field(480, ge=120, le=1080)
+    model_complexity: Literal[0, 1] = 1  # MediaPipe Hands: 0 = faster, 1 = more accurate
+    min_detection_confidence: float = Field(0.7, ge=0.1, le=1.0)
+    min_tracking_confidence: float = Field(0.6, ge=0.1, le=1.0)
+    # Pose -> behaviour. Poses left out keep their default; "none" disables a pose.
+    map: dict[GesturePose, GestureBehaviour] = Field(
+        default_factory=lambda: dict(DEFAULT_GESTURE_MAP)  # type: ignore[arg-type]
+    )
     hold_frames: int = Field(4, ge=1, le=30)
     drag_hold_ms: int = Field(400, ge=50, le=3000)
     pause_hold_ms: int = Field(1000, ge=200, le=5000)
+    # Pinch = thumb-tip to fingertip distance / hand size. Starts below pinch_on, ends above
+    # pinch_off (hysteresis, so a pinch near the threshold does not flicker).
+    pinch_on: float = Field(0.22, gt=0.0, le=1.0)
+    pinch_off: float = Field(0.32, gt=0.0, le=1.5)
     deadzone: float = Field(0.05, ge=0.0, le=0.5)
     active_box_margin: float = Field(0.15, ge=0.0, lt=0.5)
+    # Speeds per unit of offset beyond the deadzone (offset = fraction of the frame height).
+    scroll_speed: float = Field(60.0, gt=0.0, le=1000.0)  # wheel notches per second
+    volume_speed: float = Field(200.0, gt=0.0, le=2000.0)  # volume points per second
+    brightness_speed: float = Field(200.0, gt=0.0, le=2000.0)  # brightness points per second
+    max_os_calls_per_s: float = Field(10.0, ge=1.0, le=10.0)  # scroll / volume / brightness
+    # One Euro filter for the cursor (normalised units): lower min_cutoff = steadier when still,
+    # higher beta = less lag when moving fast.
+    cursor_min_cutoff: float = Field(1.0, gt=0.0, le=30.0)
+    cursor_beta: float = Field(10.0, ge=0.0, le=1000.0)
+
+    @model_validator(mode="after")
+    def _fill_map_and_check_pinch(self) -> GestureSettings:
+        self.map = {**DEFAULT_GESTURE_MAP, **self.map}  # type: ignore[dict-item]
+        if self.pinch_off <= self.pinch_on:
+            raise ValueError(
+                f"gestures.pinch_off ({self.pinch_off}) must be larger than "
+                f"gestures.pinch_on ({self.pinch_on})"
+            )
+        return self
 
 
 class LocalLLMSettings(_Section):
