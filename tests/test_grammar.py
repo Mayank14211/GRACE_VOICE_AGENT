@@ -142,6 +142,9 @@ POSITIVE: list[tuple[str, str, dict]] = [
     ("analyze the code", "app.analyze_code", {}),
     ("debug this code", "app.debug_code", {}),
     ("exit", "app.exit", {}),
+    ("stop listening", "app.end_session", {}),
+    ("That's all.", "app.end_session", {}),
+    ("start over", "app.reset_conversation", {}),
 ]
 
 NEGATIVE: list[str] = [

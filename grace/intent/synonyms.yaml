@@ -69,6 +69,12 @@ phrases:
   app.cancel: ["no", nope, cancel, cancel that, no cancel, never mind, nevermind, abort, do not]
   app.help: [help, show help, what can you do, show commands, list commands]
   app.exit: [exit, quit, exit grace, quit grace, goodbye grace]
+  # End the follow-up window (go back to waiting for the wake word); GRACE keeps running.
+  app.end_session: [stop listening, that is all, that will be all, i am done, nothing else,
+                    "go to sleep grace", bye]
+  # Make the Gemini assistant forget the conversation so far.
+  app.reset_conversation: [new conversation, start a new conversation, start over,
+                           forget the conversation, forget our conversation]
   app.dictation_start: [dictate, dictation, dictation mode, start dictation, begin dictation,
                         start dictating]
   app.dictation_stop: [stop dictation, end dictation, exit dictation, finish dictation,

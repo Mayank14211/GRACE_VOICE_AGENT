@@ -12,6 +12,8 @@ APP_INTENTS = frozenset(
         "app.cancel",
         "app.help",
         "app.exit",
+        "app.end_session",
+        "app.reset_conversation",
         "app.dictation_start",
         "app.dictation_stop",
         "app.read_screen",
