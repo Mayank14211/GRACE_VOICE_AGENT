@@ -1,6 +1,10 @@
 # GRACE Voice Agent — Project Context
 
 > This document captures a full technical snapshot of the project as of November 2026, intended as a reference for further improvement and development.
+>
+> **Historical (pre-M2).** Since S03, `system_control.py` and the volume / brightness / shutdown code in
+> `main.py` are replaced by `grace/actions/` (action registry) and `grace/intent/grammar.py`
+> (whole-phrase grammar with confirmation for risky actions). See docs/PLAN.md for the current layout.
 
 ---
 
