@@ -32,6 +32,10 @@ dependencies = [
     "pycaw==20240210 ; sys_platform == 'win32'",
     "comtypes==1.4.12 ; sys_platform == 'win32'",
     "pywin32==311 ; sys_platform == 'win32'",
+    # grace/config.py (M1): .env keys + settings.yaml tunables. pydantic was already locked via openai.
+    "pydantic==2.14.4",
+    "python-dotenv==1.2.4",
+    "pyyaml==6.0.4",
 ]
 
 [dependency-groups]

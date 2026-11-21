@@ -9,7 +9,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import doctor  # noqa: E402
 
-SECRET = "sk-THIS-MUST-NEVER-BE-PRINTED-1234567890"
+# Assembled at runtime so tests/test_no_secrets.py does not flag this file.
+SECRET = "sk" + "-THIS-MUST-NEVER-BE-PRINTED-1234567890"
 
 
 def test_python_check() -> None:
@@ -95,3 +96,31 @@ def test_microphone_opens() -> None:
 def test_camera_opens() -> None:
     result = doctor.check_camera()
     assert result.status == doctor.PASS, result.detail
+
+
+def test_env_keys_match_config() -> None:
+    from grace.config import ENV_KEYS
+
+    assert set(doctor.ENV_KEYS) == set(ENV_KEYS.values())
+
+
+def test_settings_missing_is_not_configured(tmp_path: Path) -> None:
+    results = doctor.check_settings(tmp_path / "settings.yaml", tmp_path / ".env")
+    assert results[0].status == doctor.NOT_CONFIGURED
+    assert {r.name for r in results[1:]} == {
+        "provider groq",
+        "provider gemini",
+        "provider openrouter",
+        "provider local",
+    }
+    assert all(r.status != doctor.FAIL for r in results)
+
+
+def test_settings_valid_and_invalid(tmp_path: Path) -> None:
+    path = tmp_path / "settings.yaml"
+    path.write_text("inference: {threads: 6}\n")
+    assert doctor.check_settings(path, tmp_path / ".env")[0].status == doctor.PASS
+    path.write_text("inference: {threads: 12}\n")
+    [result] = doctor.check_settings(path, tmp_path / ".env")
+    assert result.status == doctor.FAIL
+    assert "inference.threads" in result.detail

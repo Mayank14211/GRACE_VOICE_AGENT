@@ -18,6 +18,10 @@ import webbrowser
 import subprocess
 import datetime
 import traceback
+from pathlib import Path
+
+from grace.config import ConfigError, format_provider_report, load_settings, report_providers
+from grace.redaction import configure_logging, install_redaction
 
 # Import our custom modules
 from tts import TextToSpeech
@@ -1021,11 +1025,14 @@ class GraceVoiceAgent:
 
 def main():
     """Main function"""
-    parser = argparse.ArgumentParser(description='GRACE Voice Agent')
-    parser.add_argument('--gemini-key', type=str, default="AIzaSyD1VukpoEj4XVryusQckN7JnNl9y2EoQNM",
-                        help='Gemini API key')
-    parser.add_argument('--openai-key', type=str, default=None,
-                        help='OpenAI API key (for Whisper)')
+    parser = argparse.ArgumentParser(
+        description='GRACE Voice Agent. API keys are read from .env only (see .env.example).')
+    parser.add_argument('--settings', type=Path, default=None,
+                        help='settings file (default: settings.yaml in the repo root)')
+    parser.add_argument('--env-file', type=Path, default=None,
+                        help='.env file with API keys (default: .env in the repo root)')
+    parser.add_argument('--check-config', action='store_true',
+                        help='load settings and .env, report providers, then exit')
     parser.add_argument('--wake-word', type=str, default="listen",
                         help='Wake word to activate the agent')
     parser.add_argument('--voice-index', type=int, default=None,
@@ -1036,7 +1043,19 @@ def main():
                         help='List available voices and exit')
     
     args = parser.parse_args()
-    
+
+    configure_logging()
+    try:
+        settings = load_settings(args.settings, args.env_file)
+    except ConfigError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        sys.exit(2)
+    install_redaction(settings.secret_values())
+    statuses = report_providers(settings)
+    print("LLM providers:\n" + format_provider_report(statuses))
+    if args.check_config:
+        return
+
     # If user wants to list voices
     if args.list_voices:
         tts = TextToSpeech()
@@ -1052,8 +1071,8 @@ def main():
         return
     
     agent = GraceVoiceAgent(
-        gemini_api_key=args.gemini_key,
-        openai_api_key=args.openai_key,
+        gemini_api_key=settings.api_key("gemini") if "gemini" in settings.enabled_providers() else None,
+        openai_api_key=None,  # legacy Whisper API path; replaced by Groq / local STT in M5
         wake_word=args.wake_word
     )
     

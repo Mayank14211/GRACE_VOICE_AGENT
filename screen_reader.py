@@ -320,9 +320,9 @@ class ScreenReader:
 
 # Example usage
 if __name__ == "__main__":
-    # Initialize with Gemini API key if available
-    gemini_api_key = "AIzaSyD1VukpoEj4XVryusQckN7JnNl9y2EoQNM"  # Replace with your API key
-    reader = ScreenReader(gemini_api_key)
+    # Gemini key comes from .env (GEMINI_API_KEY); without it, AI analysis is disabled.
+    from grace.config import load_settings
+    reader = ScreenReader(load_settings().api_key("gemini"))
     
     # Capture screen and extract text
     print("Capturing screen...")
