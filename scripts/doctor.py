@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:  # `python scripts/doctor.py` only puts scripts/ on sys.path
+    sys.path.insert(0, str(ROOT))
 IS_WINDOWS = sys.platform == "win32"
 
 PASS, WARN, FAIL, NOT_CONFIGURED = "PASS", "WARN", "FAIL", "not configured"
@@ -54,17 +56,21 @@ IMPORTS: tuple[tuple[str, str, bool], ...] = (
     ("comtypes", "comtypes", True),
     ("pycaw.pycaw", "pycaw", True),
     ("win32gui", "pywin32", True),
+    ("pydantic", "pydantic", False),
+    ("dotenv", "python-dotenv", False),
+    ("yaml", "PyYAML", False),
+    ("grace.config", "grace (config)", False),
 )
 
 # Model files: (relative path under models/, expected sha256). Filled in from M5 onward.
 MODELS: tuple[tuple[str, str], ...] = ()
 
 # Keys GRACE may read from .env (all optional: cloud providers are accelerators only).
+# Must match grace.config.ENV_KEYS (tests/test_doctor.py checks this).
 ENV_KEYS: tuple[str, ...] = ("GROQ_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY")
 
 # Features from docs/PLAN.md that do not exist yet in the codebase.
 NOT_BUILT: tuple[str, ...] = (
-    "settings.yaml (M1)",
     "wake word model (M5)",
     "local STT: moonshine-voice (M5)",
     "llama-server (M6)",
@@ -215,15 +221,9 @@ def check_models(
 
 def read_env_key_names(env_path: Path) -> set[str]:
     """Return the names of keys with a non-empty value. Values are read but never returned."""
-    names = set()
-    for raw in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.removeprefix("export ").partition("=")
-        if value.strip().strip("'\""):
-            names.add(key.strip())
-    return names
+    from dotenv import dotenv_values  # same parser grace.config uses
+
+    return {k for k, v in dotenv_values(env_path).items() if v and v.strip()}
 
 
 def check_env(env_path: Path = ROOT / ".env", keys: Iterable[str] = ENV_KEYS) -> list[Result]:
@@ -238,6 +238,26 @@ def check_env(env_path: Path = ROOT / ".env", keys: Iterable[str] = ENV_KEYS) ->
         )
         for key in keys
     ]
+
+
+def check_settings(settings_path: Path | None = None, env_path: Path | None = None) -> list[Result]:
+    """Validate settings.yaml and report which LLM providers are usable (never key values)."""
+    from grace.config import DEFAULT_SETTINGS_PATH, ConfigError, load_settings
+
+    settings_path = settings_path or DEFAULT_SETTINGS_PATH
+    try:
+        settings = load_settings(settings_path, env_path)
+    except ConfigError as exc:
+        return [Result("settings.yaml", FAIL, " ".join(str(exc).split()))]
+    if settings_path.is_file():
+        detail = f"valid; inference.threads={settings.inference.threads}"
+        results = [Result("settings.yaml", PASS, detail)]
+    else:
+        results = [Result("settings.yaml", NOT_CONFIGURED, "missing; using defaults")]
+    for status in settings.provider_status():
+        state = PASS if status.enabled else NOT_CONFIGURED
+        results.append(Result(f"provider {status.provider}", state, status.reason))
+    return results
 
 
 def check_not_built(features: Iterable[str] = NOT_BUILT) -> list[Result]:
@@ -258,7 +278,7 @@ def run_checks(hardware: bool = True) -> list[Result]:
     ]
     if hardware:
         checks += [check_microphone, check_camera]
-    checks += [check_models, check_env, check_not_built]
+    checks += [check_models, check_env, check_settings, check_not_built]
 
     results: list[Result] = []
     for check in checks:
