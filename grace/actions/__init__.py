@@ -63,8 +63,11 @@ def create_registry(
     register_input_actions(
         registry, keyboard_mouse, clipboard or PyperclipClipboard(), **input_options
     )
-    register_app_actions(registry, launcher or WindowsLauncher(), keyboard_mouse)
-    register_screen_actions(registry, screenshots or PyAutoGuiScreenshot(), screenshot_dir)
+    launcher = launcher or WindowsLauncher()
+    register_app_actions(registry, launcher, keyboard_mouse)
+    register_screen_actions(
+        registry, screenshots or PyAutoGuiScreenshot(), screenshot_dir, opener=launcher
+    )
     return registry
 
 

@@ -88,12 +88,16 @@ class FakeClipboard:
 class FakeLauncher:
     launched: list[str] = field(default_factory=list)
     urls: list[str] = field(default_factory=list)
+    files: list[Path] = field(default_factory=list)
 
     def launch(self, command: str) -> None:
         self.launched.append(command)
 
     def open_url(self, url: str) -> None:
         self.urls.append(url)
+
+    def open_file(self, path: Path) -> None:
+        self.files.append(path)
 
 
 @dataclass

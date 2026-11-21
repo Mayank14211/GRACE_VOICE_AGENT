@@ -7,11 +7,13 @@ spoken text is gone: it passed user speech to a shell.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
 import webbrowser
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlsplit
 
@@ -113,6 +115,7 @@ class UrlArgs(ActionArgs):
 class Launcher(Protocol):
     def launch(self, command: str) -> None: ...
     def open_url(self, url: str) -> None: ...
+    def open_file(self, path: Path) -> None: ...
 
 
 class WindowsLauncher:
@@ -133,6 +136,15 @@ class WindowsLauncher:
     def open_url(self, url: str) -> None:
         if not webbrowser.open(url):
             raise ActionError("Couldn't open the browser.")
+
+    def open_file(self, path: Path) -> None:
+        """Open a file with its default app. Callers restrict which paths may get here."""
+        if sys.platform != "win32":
+            raise ActionError("Opening files is only supported on Windows.")
+        try:
+            os.startfile(path)  # type: ignore[attr-defined]
+        except OSError as exc:
+            raise ActionError("Couldn't open the file.") from exc
 
 
 # --------------------------------------------------------------------------- registration
