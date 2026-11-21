@@ -135,3 +135,8 @@ def test_grammar_check_passes() -> None:
 def test_doctor_imports_new_layers() -> None:
     names = {module for module, _, _ in doctor.IMPORTS}
     assert {"grace.actions", "grace.intent.grammar"} <= names
+
+
+def test_assistant_check_without_key(tmp_path: Path) -> None:
+    result = doctor.check_assistant(tmp_path / "none.yaml", tmp_path / ".env")
+    assert result.status == doctor.NOT_CONFIGURED

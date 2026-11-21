@@ -285,6 +285,29 @@ def check_grammar() -> Result:
     return Result("command grammar", PASS, detail)
 
 
+def check_assistant(settings_path: Path | None = None, env_path: Path | None = None) -> Result:
+    """Gemini assistant config and tool list (no network call; Gemini is optional)."""
+    from grace.actions import create_fake_registry
+    from grace.config import ConfigError, load_settings
+    from grace.intent.assistant import registry_tools
+
+    try:
+        settings = load_settings(settings_path, env_path)
+    except ConfigError:
+        return Result("gemini assistant", NOT_CONFIGURED, "settings.yaml invalid (see above)")
+    tools, names = registry_tools(create_fake_registry()[0])
+    if any(create_fake_registry()[0].is_risky(a) for a in names.values()):
+        return Result("gemini assistant", FAIL, "a risky action is exposed to the LLM")
+    if "gemini" not in settings.enabled_providers():
+        return Result("gemini assistant", NOT_CONFIGURED, "GEMINI_API_KEY not set in .env")
+    g = settings.gemini
+    extras = [n for n, on in (("web search", g.web_search), ("images", g.image_generation)) if on]
+    detail = f"{g.model}, {len(tools)} action tools"
+    if extras:
+        detail += f"; {' + '.join(extras)} need a billing-enabled key"
+    return Result("gemini assistant", PASS, detail)
+
+
 def check_volume() -> Result:
     """Read (never change) the default playback device's volume through pycaw."""
     if not IS_WINDOWS:
@@ -328,6 +351,7 @@ def run_checks(hardware: bool = True) -> list[Result]:
         check_mediapipe_legacy_hands,
         check_tesseract,
         check_grammar,
+        check_assistant,
     ]
     if hardware:
         checks += [check_microphone, check_camera, check_volume, check_brightness]
