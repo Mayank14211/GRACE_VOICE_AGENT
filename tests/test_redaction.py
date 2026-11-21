@@ -22,6 +22,7 @@ FAKES = {
     "openrouter": "sk" + "-or-v1-" + "0f" * 32,
     "huggingface_token": "hf" + "_" + "Qw" * 17,
     "groq_api_key": "gsk" + "_" + "Mn" * 26,
+    "google_auth_key": "AQ" + "." + "Ab8R" + "x7_-" * 12,
 }
 
 
