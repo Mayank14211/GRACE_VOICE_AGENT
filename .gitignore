@@ -10,6 +10,8 @@ __pycache__/
 .env
 .env.*
 !.env.example
+# Local settings (copy from settings.example.yaml)
+settings.yaml
 
 # Models and runtime output (downloaded with hash checks, never committed)
 models/

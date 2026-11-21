@@ -1,0 +1,63 @@
+# GRACE settings — copy to settings.yaml and edit. settings.yaml is git-ignored.
+#
+#   copy settings.example.yaml settings.yaml
+#
+# Every option is optional: anything you leave out keeps the default shown here.
+# Unknown or misspelled options are rejected at startup with a clear message.
+# API KEYS NEVER GO IN THIS FILE. They live in .env (see .env.example).
+
+# Speech language. en = English (offline STT). hi / auto need a cloud or Whisper STT (Phase 2).
+language: en
+
+# Demo mode pins the LLM router to the local llama-server only (no cloud calls, predictable latency).
+demo_mode: false
+
+# Global hotkeys (the PRIMARY toggles; voice equivalents are never relied on).
+# Format: modifiers and key joined with "+", lower case, e.g. ctrl+alt+m. Must all be different.
+hotkeys:
+  mic_toggle: ctrl+alt+m        # microphone listening on/off
+  gesture_toggle: ctrl+alt+g    # gesture control on/off
+  push_to_talk: ctrl+alt+space  # hold to talk
+  panic_stop: ctrl+alt+q        # stop all input and release the mouse; app stays alive
+  confirm: ctrl+alt+y           # confirm a pending risky action (shutdown, restart, send...)
+  history: ctrl+alt+h           # show/hide the conversation history panel
+  mark_wrong: ctrl+alt+x        # mark the last action as wrong (metrics)
+
+inference:
+  # CPU threads for local models (STT, llama-server). 1-8.
+  # 4 on the Intel i5-12450H (P-cores only), 6 on the AMD Ryzen 5 5500U.
+  # Never use the logical-thread count (12). Benchmark with scripts/bench_threads.py.
+  threads: 4
+
+audio:
+  sample_rate: 16000      # fixed: wake word, VAD and STT models expect 16 kHz mono
+  input_device: null      # null = system default mic; or a sounddevice index / name substring
+  vad_threshold: 0.5      # Silero VAD speech probability (0-1); raise it in noisy rooms
+  end_of_speech_ms: 500   # silence that ends an utterance (100-5000 ms)
+  max_utterance_s: 15.0   # hard cap on one utterance (seconds)
+
+wakeword:
+  enabled: true                          # false = hotkeys / push-to-talk only
+  model_path: models/wakeword/grace.onnx # openWakeWord model, relative to the repo root
+  threshold: 0.5                         # detection score (0-1); lower = more sensitive
+
+gestures:
+  camera_index: 0         # webcam index (0 = default camera)
+  hold_frames: 4          # frames a pose must hold before it activates (1-30)
+  drag_hold_ms: 400       # pinch held longer than this starts a drag instead of a click
+  pause_hold_ms: 1000     # fist held this long pauses / resumes gestures
+  deadzone: 0.05          # scroll / volume / brightness ignore offsets smaller than this (0-0.5)
+  active_box_margin: 0.15 # frame margin excluded from the cursor box on each side (0-0.5)
+
+router:
+  # LLM fallback order for input the fixed grammar does not match.
+  # Providers: groq, gemini, openrouter (need a key in .env), local (llama-server).
+  # A provider without its key is skipped automatically.
+  provider_order: [groq, gemini, openrouter, local]
+  cloud_timeout_s: 3.0    # per-request timeout for cloud providers
+  local_timeout_s: 15.0   # per-request timeout for the local llama-server
+  max_retries: 1          # retries per provider before moving to the next (0-3)
+  cooldown_s: 60.0        # after an HTTP 429 or error, skip that provider for this long
+  local:
+    enabled: false        # true once llama-server is running (scripts/run_llama_server.ps1)
+    base_url: http://127.0.0.1:8080/v1
