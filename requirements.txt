@@ -151,7 +151,9 @@ pycaw==20240210 ; sys_platform == 'win32'
 pycparser==3.12 ; implementation_name != 'PyPy'
     # via cffi
 pydantic==2.14.4
-    # via openai
+    # via
+    #   grace
+    #   openai
 pydantic-core==2.50.5
     # via pydantic
 pygetwindow==0.0.9
@@ -910,6 +912,8 @@ pytesseract==0.3.10
     # via grace
 python-dateutil==4.0.0
     # via matplotlib
+python-dotenv==1.2.4
+    # via grace
 python3-xlib==0.15 ; sys_platform == 'linux'
     # via
     #   mouseinfo
@@ -925,6 +929,8 @@ pywin32==311 ; sys_platform == 'win32'
     #   pyttsx3
     #   screen-brightness-control
     #   wmi
+pyyaml==6.0.4
+    # via grace
 requests==2.34.2
     # via
     #   google-api-core
