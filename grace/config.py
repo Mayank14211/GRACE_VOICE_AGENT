@@ -93,6 +93,27 @@ class WakeWordSettings(_Section):
     enabled: bool = True
     model_path: Path = Path("models/wakeword/grace.onnx")
     threshold: float = Field(0.5, ge=0.0, le=1.0)
+    # After the wake word, keep listening for follow-up commands until this many seconds pass
+    # without one. 0 = say the wake word before every command.
+    follow_up_s: float = Field(10.0, ge=0.0, le=120.0)
+
+
+class GeminiSettings(_Section):
+    """Gemini assistant for requests the fixed grammar doesn't understand (needs GEMINI_API_KEY).
+
+    Text answers and tool calling work on the free tier. Web search (Google Search grounding)
+    and image generation need a key from a billing-enabled Google Cloud project.
+    """
+
+    model: str = "gemini-3.5-flash-lite"
+    image_model: str = "gemini-3.1-flash-image"
+    web_search: bool = True
+    image_generation: bool = True
+    thinking_level: Literal["minimal", "low", "medium", "high"] = "low"
+    timeout_s: float = Field(20.0, gt=0.0, le=120.0)
+    image_timeout_s: float = Field(90.0, gt=0.0, le=300.0)
+    # Forget the conversation after this long without a question (0 = never forget).
+    memory_reset_s: float = Field(600.0, ge=0.0, le=86400.0)
 
 
 class GestureSettings(_Section):
@@ -150,6 +171,7 @@ class Settings(_Section):
     wakeword: WakeWordSettings = Field(default_factory=WakeWordSettings)
     gestures: GestureSettings = Field(default_factory=GestureSettings)
     router: RouterSettings = Field(default_factory=RouterSettings)
+    gemini: GeminiSettings = Field(default_factory=GeminiSettings)
     keys: ApiKeys = Field(default_factory=ApiKeys, exclude=True)
 
     # ------------------------------------------------------------ providers
