@@ -1,0 +1,158 @@
+# Spoken vocabulary for grace/intent/grammar.py.
+#
+# The grammar matches WHOLE utterances only. A phrase here never fires because it appears
+# somewhere inside a longer sentence ("I said mute it" does not mute).
+#
+# Text is normalised before matching: lower case, punctuation removed, "40%" -> "40 percent",
+# number words -> digits ("forty five" -> "45"), "what's" -> "what is".
+# So write entries in lower case, with digits, without punctuation.
+#
+# Template syntax (phrases, shortcuts, and the rules in grammar.py):
+#   word        a literal word
+#   {group}     any entry of `groups` below          {group?}  the same, optional
+#   <name:grp>  capture a group as argument `name`   <name:grp>?  optional capture
+
+# Politeness / wake words stripped from the start or end of an utterance before matching.
+fillers:
+  leading: [please, kindly, can you, could you, would you, will you,
+            grace, hey grace, ok grace, okay grace]
+  trailing: [please, thanks, thank you, for me]
+
+groups:
+  det: [the, my, this, our, current, the current]
+  article: [a, an, the]
+  set: [set, change, make, put, adjust, turn]
+  to: [to, at]
+  turn: [turn]
+  percent: [percent, per cent, percentage]
+  updown: [up, down]
+  increase: [increase, raise, boost]
+  decrease: [decrease, lower, reduce]
+  small: [a little, a little bit, a bit, slightly, a tad]
+  large: [a lot, lots, way, much]
+  maximum: [max, maximum, the max, the maximum, full]
+  minimum: [min, minimum, the minimum]
+  half: [half, halfway]
+  query: [what is, tell me, check, get, show]
+  volume: [volume, sound, audio, system volume, speaker volume, volume level]
+  louder: [louder]
+  quieter: [quieter, softer]
+  mute: [mute, silence]
+  unmute: [unmute, un mute]
+  brightness: [brightness, screen brightness, display brightness, brightness level]
+  brighter: [brighter]
+  dimmer: [dimmer, darker]
+  brighten: [brighten]
+  dim: [dim, darken]
+  screen: [screen, display, monitor]
+  # Risky phrases: these only ever match as "<verb> [the|my|this] <machine>".
+  machine: [computer, pc, laptop, system, machine]
+  shut_down: [shut down, shutdown, power off, power down, turn off, switch off]
+  restart: [restart, reboot]
+  sleep: [sleep]
+  click: [click]
+  left: [left]
+  here: [here]
+  multi: [double, triple]
+  button: [right, middle]
+  scroll: [scroll]
+  press: [press, hit, push, tap]
+  open: [open, launch, start, run]
+  take: [take, capture, grab]
+  screenshot: [screenshot, screen shot, screen capture, screengrab, screen grab]
+  analyze: [analyze, analyse]
+
+# Fixed whole phrases -> intent (no arguments). Checked before the rules in grammar.py.
+phrases:
+  # YAML turns bare yes / no / on / off into booleans: quote them.
+  app.confirm: ["yes", yeah, yep, confirm, confirmed, yes confirm, yes do it, go ahead]
+  app.cancel: ["no", nope, cancel, cancel that, no cancel, never mind, nevermind, abort, do not]
+  app.help: [help, show help, what can you do, show commands, list commands]
+  app.exit: [exit, quit, exit grace, quit grace, goodbye grace]
+  app.dictation_start: [dictate, dictation, dictation mode, start dictation, begin dictation,
+                        start dictating]
+  app.dictation_stop: [stop dictation, end dictation, exit dictation, finish dictation,
+                       stop dictating]
+  app.read_screen: ["read {det?} screen", read screen text]
+  app.read_selection: ["read {det?} selection", "read {det?} selected text",
+                       "read {det?} clipboard"]
+  app.analyze_code: ["{analyze} {det?} code", "{analyze} {det?} selected code",
+                     "{analyze} {det?} selection"]
+  app.analyze_screen: ["{analyze} {det?} screen"]
+  app.debug_code: ["debug {det?} code", "debug {det?} selected code", "debug {det?} selection"]
+  clipboard.copy: [copy, copy that, copy this, copy it, "copy {det?} selection",
+                   "copy {det?} selected text"]
+  clipboard.paste: [paste, paste that, paste it, paste here]
+  apps.close_window: ["close {det?} window"]
+  apps.close_tab: ["close {det?} tab", "close {det?} browser tab"]
+  screen.screenshot: ["{take?} {article?} {screenshot}", "{take} {det?} screen"]
+
+# Named keyboard shortcuts -> input.hotkey. `keys` use the names in grace/actions/input_ctl.py.
+shortcuts:
+  - keys: [ctrl, x]
+    say: [cut, cut that, cut this, cut it]
+  - keys: [ctrl, z]
+    say: [undo, undo that]
+  - keys: [ctrl, y]
+    say: [redo, redo that]
+  - keys: [ctrl, s]
+    say: [save, save it, save this, save that, "save {det?} file"]
+  - keys: [ctrl, a]
+    say: [select all, select everything]
+  - keys: [ctrl, f]
+    say: [find, "find on {det?} page", "search {det?} page"]
+  - keys: [ctrl, t]
+    say: [new tab, "open {article?} new tab"]
+  - keys: [ctrl, p]
+    say: [print, print this]
+  - keys: [f5]
+    say: [refresh, reload, "refresh {det?} page", "reload {det?} page"]
+  - keys: [alt, tab]
+    say: [switch window, switch windows, next window]
+  - keys: [win, down]
+    say: [minimize, minimise, "minimize {det?} window", "minimise {det?} window"]
+  - keys: [win, up]
+    say: [maximize, maximise, "maximize {det?} window", "maximise {det?} window"]
+  - keys: [win, left]
+    say: [window left, "snap {det?} window left"]
+  - keys: [win, right]
+    say: [window right, "snap {det?} window right"]
+  - keys: [win]
+    say: [start menu, "open {det?} start menu"]
+  - keys: [win, tab]
+    say: [task view, show task view]
+  - keys: [win, d]
+    say: [show desktop, go to desktop, "go to {det?} desktop"]
+  - keys: [alt, left]
+    say: [go back]
+  - keys: [alt, right]
+    say: [go forward]
+
+# Spoken key names for "press ..." (key combos joined by spaces, "plus" or "and").
+# Letters a-z, digits 0-9 and "f1".."f12" / "f 1".."f 12" are recognised without listing them.
+keys:
+  ctrl: [control, ctrl, ctl]
+  alt: [alt]
+  shift: [shift]
+  win: [windows, win, windows key, start key]
+  enter: [enter, return]
+  esc: [escape, esc]
+  tab: [tab]
+  space: [space, spacebar, space bar]
+  backspace: [backspace, back space]
+  delete: [delete, del]
+  insert: [insert]
+  home: [home]
+  end: [end]
+  pageup: [page up]
+  pagedown: [page down]
+  up: [up, up arrow, arrow up]
+  down: [down, down arrow, arrow down]
+  left: [left, left arrow, arrow left]
+  right: [right, right arrow, arrow right]
+  capslock: [caps lock, capslock]
+  printscreen: [print screen]
+
+# Default sizes for steps without a number ("volume up", "scroll down a lot").
+steps: {small: 5, normal: 10, large: 30}     # percentage points (volume, brightness)
+scroll: {small: 1, normal: 3, large: 10}     # wheel notches
