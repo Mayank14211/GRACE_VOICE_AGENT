@@ -118,8 +118,15 @@ python main.py --list-voices
 
 After saying the wake word, you can use these commands. Commands must be the **whole** utterance:
 "volume 40" works, "I said volume 40 yesterday" does nothing. Numbers can be spoken ("forty") or
-digits, and "please" / "can you" in front are ignored. Unmatched speech is not acted on (the LLM
-router for free-form requests lands in a later milestone).
+digits, and "please" / "can you" in front are ignored. Anything that isn't a fixed command goes
+to the Gemini assistant (see below) when `GEMINI_API_KEY` is set; otherwise GRACE says it didn't
+understand.
+
+**Follow-up commands:** say the wake word once, then keep going: "open notepad", "type Hello,
+World!", "close this window". You can also say the command in the same breath as the wake word
+("listen, open notepad"). GRACE keeps listening until you pause for `wakeword.follow_up_s` seconds
+(default 10; `0` = wake word before every command), or until you say "stop listening" / "that's
+all". It waits until it has finished speaking before it listens, so it doesn't hear itself.
 
 - **Volume and brightness** (exact values, 0-100; out-of-range values are clamped):
   - "Volume 40" / "Set the volume to 70 percent" / "Volume max"
@@ -145,6 +152,28 @@ router for free-form requests lands in a later milestone).
     "No", any other command, or the timeout cancels.
 
 The full vocabulary (synonyms, shortcuts, key names) is in `grace/intent/synonyms.yaml`.
+
+### Gemini assistant (optional)
+
+With `GEMINI_API_KEY` in `.env`, speech that isn't a fixed command goes to Gemini
+(`gemini.model` in `settings.yaml`, default `gemini-3.5-flash-lite`):
+
+| Ask | What happens | Gemini tier needed |
+|---|---|---|
+| "What's the capital of France?" / "And its population?" | Short spoken answer; remembers the conversation ("start over" forgets it) | Free |
+| "Turn the volume down a bit and open youtube" | Tool calling: Gemini uses GRACE's actions (volume, apps, keys, typing...) | Free |
+| "Search the web for today's weather in Delhi" | Google Search grounding; sources printed in the console | **Billing-enabled key** |
+| "Generate an image of a cat in sunglasses" | Image saved to `Pictures\GRACE` and opened | **Billing-enabled key** |
+| "Analyze the code" / "Debug this code" | Selected code is reviewed by Gemini | Free |
+
+- Google gives **no free quota** for search grounding or image generation. On a free key GRACE
+  says so instead of failing silently. Turn them off with `gemini.web_search: false` /
+  `gemini.image_generation: false`.
+- Gemini can **never** shut down, restart or sleep the computer. Those stay exact-phrase +
+  confirmation only.
+- Privacy: what you say to the assistant, and code you ask it to analyze, is sent to Google.
+  Free-tier inputs may be used to improve Google's models. Action results sent back to Gemini
+  are only the spoken message (e.g. "Copied."), never clipboard contents.
 
 - **Text Input**:
   - "Dictate" - Starts dictation mode
