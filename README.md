@@ -13,6 +13,19 @@ GRACE (General-purpose Responsive Assistant for Computer Environment) is an AI-p
 
 > Project plan and roadmap: [docs/PLAN.md](docs/PLAN.md) (source of truth).
 
+> [!WARNING]
+> **Leaked keys: revoke them.** Earlier commits of this repository contained a Google Gemini API
+> key, a Stability AI key and a Hugging Face token in plain text (`main.py`, `screen_reader.py`,
+> `test_screen_reader.py`, `voice_agent.py`). They are gone from the current code but **remain in
+> git history**, so anyone with a clone can read them. Whoever owns those accounts MUST revoke
+> them (Google AI Studio → API keys; Stability AI → account keys; Hugging Face → Settings → Access
+> Tokens) and create new ones in `.env`. Removing a key from the code does not un-leak it.
+>
+> History has deliberately **not** been rewritten. Purging it (e.g. with
+> [`git filter-repo`](https://github.com/newren/git-filter-repo) `--replace-text`) changes every
+> commit hash and needs every collaborator to re-clone, so it is a team decision (see
+> docs/PLAN.md §11). Revoking the keys is required either way; purging alone is not enough.
+
 ## Requirements
 
 - Windows 10/11, 64-bit
@@ -54,14 +67,22 @@ uv run ruff check .
 Adding a dependency: confirm a cp311 win_amd64 wheel exists, then
 `uv add <pkg>==<version>`, `uv lock`, `uv pip check`, and re-export `requirements.txt`.
 
-5. Install Tesseract OCR:
+5. Configure (optional; everything has a default):
+```powershell
+copy .env.example .env                    # API keys: GROQ_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY
+copy settings.example.yaml settings.yaml  # hotkeys, thresholds, provider order, inference.threads
+uv run python main.py --check-config      # shows which providers are enabled, then exits
+```
+See [Configuration](#configuration) below.
+
+6. Install Tesseract OCR:
    - **Windows**: Download and install from [Tesseract at UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki)
    - **macOS**: `brew install tesseract`
    - **Linux**: `sudo apt install tesseract-ocr`
 
-6. Make sure to add Tesseract to your system PATH.
+7. Make sure to add Tesseract to your system PATH.
 
-7. Verify Tesseract installation:
+8. Verify Tesseract installation:
 ```bash
 uv run python tesseract_check.py
 ```
@@ -80,10 +101,12 @@ Run the standalone hand-gesture controller:
 uv run python Hand_Gesture.py
 ```
 
-You can customize the wake word and API keys:
+You can customize the wake word (API keys are never passed on the command line; see
+[Configuration](#configuration)):
 
 ```bash
-python main.py --wake-word "computer" --gemini-key "your-gemini-api-key"
+uv run python main.py --wake-word "computer"
+uv run python main.py --settings my-settings.yaml --env-file my.env
 ```
 
 List available voices:
@@ -165,7 +188,7 @@ The code analysis feature uses Google's Gemini AI to analyze and debug code:
 - "Debug code" - Identifies potential errors and suggests fixes
 
 For both commands to work:
-- A valid Gemini API key must be provided
+- `GEMINI_API_KEY` must be set in `.env`
 - Text must be selected before issuing the command
 
 Example:
@@ -181,9 +204,33 @@ Example:
 - **Installation problems**: Run `tesseract_check.py` to diagnose issues
 
 ### Code Analysis Issues
-- **"Gemini AI not available"**: Check your API key is valid and provided
+- **"Gemini AI not available"**: Check `GEMINI_API_KEY` is set in `.env`
+  (`uv run python main.py --check-config` shows whether the provider is enabled)
 - **No analysis**: Ensure you've selected code before issuing the command
 - **Network errors**: Check your internet connection
+
+## Configuration
+
+GRACE reads two files from the repository root. Both are git-ignored and both are optional.
+
+| File | Holds | Template |
+|---|---|---|
+| `.env` | API keys only: `GROQ_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY` | `.env.example` |
+| `settings.yaml` | Hotkeys, audio/gesture thresholds, wake word model path, language, `demo_mode`, `inference.threads`, LLM provider order and timeouts | `settings.example.yaml` (every option documented inline) |
+
+- **Every key is optional.** Wake word, English STT, gestures and fixed commands work offline. A
+  missing key disables that cloud provider; startup logs one line per disabled provider.
+- **Keys go in `.env` only.** Never in code, `settings.yaml` (it is rejected at startup if it
+  contains anything key-like), command-line flags or commit messages. Process environment
+  variables with the same names override `.env`.
+- **Invalid settings fail fast** with a readable message naming the bad option
+  (e.g. `inference.threads: Input should be less than or equal to 8`). Unknown options are typos
+  and are rejected.
+- `inference.threads`: 4 on the Intel i5-12450H (P-cores), 6 on the Ryzen 5 5500U. Never 12.
+- Logs pass through a redaction filter that replaces anything key-shaped (`AIza…`, `sk-…`, `hf_…`,
+  `gsk_…`) and every configured key value with `[REDACTED]`.
+- `tests/test_no_secrets.py` fails the suite if a key-shaped string appears anywhere in the
+  working tree (outside `.venv/`, `.git/` and your local `.env`).
 
 ## Architecture
 
