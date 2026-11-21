@@ -18,8 +18,11 @@ def test_screen_reader():
         from screen_reader import ScreenReader
         print("✓ Imported ScreenReader module")
         
-        # Initialize ScreenReader with the gemini key
-        key = "AIzaSyD1VukpoEj4XVryusQckN7JnNl9y2EoQNM"
+        # Gemini key comes from .env (GEMINI_API_KEY); without it, code analysis is skipped.
+        from grace.config import load_settings
+        key = load_settings().api_key("gemini")
+        if not key:
+            print("! GEMINI_API_KEY not set in .env: code analysis will report Gemini unavailable")
         reader = ScreenReader(gemini_api_key=key)
         print("✓ Initialized ScreenReader")
         
