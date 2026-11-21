@@ -62,6 +62,8 @@ IMPORTS: tuple[tuple[str, str, bool], ...] = (
     ("grace.config", "grace (config)", False),
     ("grace.actions", "grace (action registry)", False),
     ("grace.intent.grammar", "grace (command grammar)", False),
+    ("grace.input.gestures", "grace (gesture engine)", False),
+    ("grace.actions.executor", "grace (action executor)", False),
 )
 
 # Model files: (relative path under models/, expected sha256). Filled in from M5 onward.
@@ -145,7 +147,7 @@ def check_mediapipe_legacy_hands() -> Result:
     try:
         import mediapipe as mp
 
-        mp.solutions.hands  # noqa: B018 - Hand_Gesture.py relies on the legacy API
+        mp.solutions.hands  # noqa: B018 - grace/input/gestures/tracker.py uses the legacy API
         return Result("mediapipe solutions.hands", PASS, "legacy API present")
     except Exception as exc:  # noqa: BLE001
         return Result("mediapipe solutions.hands", FAIL, f"{type(exc).__name__}: {exc}")
@@ -308,6 +310,60 @@ def check_assistant(settings_path: Path | None = None, env_path: Path | None = N
     return Result("gemini assistant", PASS, detail)
 
 
+def check_gestures(settings_path: Path | None = None, env_path: Path | None = None) -> Result:
+    """Gesture map from settings.yaml builds a controller whose intents all have handlers."""
+    from grace.actions import create_fake_registry
+    from grace.config import ConfigError, load_settings
+    from grace.input.gestures import Behaviour, ControllerConfig, GestureController
+
+    try:
+        gs = load_settings(settings_path, env_path).gestures
+    except ConfigError:
+        return Result("gesture map", NOT_CONFIGURED, "settings.yaml invalid (see above)")
+    controller = GestureController(ControllerConfig.from_settings(gs, (1920, 1080)))
+    registry, _ = create_fake_registry()
+    needed = ("input.move_to", "input.click", "input.mouse_down", "input.mouse_up",
+              "input.scroll", "volume.step", "brightness.step")  # fmt: skip
+    missing = [n for n in needed if n not in registry]
+    if missing:
+        return Result("gesture map", FAIL, f"actions missing from the registry: {missing}")
+    mapping = controller.cfg.gesture_map
+    active = sorted(p.value for p, b in mapping.items() if b is not Behaviour.NONE)
+    detail = (
+        f"{len(active)} poses mapped, hold {gs.hold_frames} frames, "
+        f"pinch {gs.pinch_on}/{gs.pinch_off}"
+    )
+    return Result("gesture map", PASS, detail)
+
+
+def check_hand_tracker(frames: int = 15) -> Result:
+    """Open the camera through MediaPipe Hands and time a few frames (no window)."""
+    try:
+        from grace.config import load_settings
+        from grace.input.gestures import open_mediapipe_tracker
+
+        gs = load_settings().gestures
+        started = time.perf_counter()
+        tracker = open_mediapipe_tracker(gs)
+        try:
+            got = [tracker.read() for _ in range(frames)]
+        finally:
+            tracker.close()
+        elapsed = time.perf_counter() - started
+        ok = [f for f in got if f is not None]
+        if len(ok) < frames // 2:
+            return Result("hand tracker", FAIL, f"only {len(ok)}/{frames} frames from the camera")
+        hands = sum(f.hand is not None for f in ok)
+        return Result(
+            "hand tracker",
+            PASS,
+            f"MediaPipe on camera {gs.camera_index}: {len(ok)} frames in {elapsed:.1f} s "
+            f"incl. start-up, hand in {hands}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return Result("hand tracker", FAIL, f"{type(exc).__name__}: {exc}")
+
+
 def check_volume() -> Result:
     """Read (never change) the default playback device's volume through pycaw."""
     if not IS_WINDOWS:
@@ -352,9 +408,16 @@ def run_checks(hardware: bool = True) -> list[Result]:
         check_tesseract,
         check_grammar,
         check_assistant,
+        check_gestures,
     ]
     if hardware:
-        checks += [check_microphone, check_camera, check_volume, check_brightness]
+        checks += [
+            check_microphone,
+            check_camera,
+            check_hand_tracker,
+            check_volume,
+            check_brightness,
+        ]
     checks += [check_models, check_env, check_settings, check_not_built]
 
     results: list[Result] = []
@@ -368,6 +431,7 @@ def run_checks(hardware: bool = True) -> list[Result]:
         results += [
             Result("microphone", WARN, "skipped (--no-hardware)"),
             Result("camera", WARN, "skipped (--no-hardware)"),
+            Result("hand tracker", WARN, "skipped (--no-hardware)"),
             Result("volume (pycaw)", WARN, "skipped (--no-hardware)"),
             Result("brightness", WARN, "skipped (--no-hardware)"),
         ]
