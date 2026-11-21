@@ -258,3 +258,29 @@ def test_report_never_logs_key_values(tmp_path: Path, caplog: pytest.LogCaptureF
 def test_format_provider_report(tmp_path: Path) -> None:
     text = config.format_provider_report(load(tmp_path).provider_status())
     assert "groq" in text and "disabled" in text and "GROQ_API_KEY not set" in text
+
+
+def test_follow_up_and_gemini_settings(tmp_path: Path) -> None:
+    good = tmp_path / "settings.yaml"
+    good.write_text(
+        "wakeword: {follow_up_s: 0}\n"
+        "gemini: {model: gemini-3.8-flash, web_search: false, thinking_level: minimal}\n"
+    )
+    s = load_settings(good, tmp_path / ".env", environ={})
+    assert s.wakeword.follow_up_s == 0
+    assert (s.gemini.model, s.gemini.web_search, s.gemini.thinking_level) == (
+        "gemini-3.8-flash",
+        False,
+        "minimal",
+    )
+    assert Settings().gemini.model == "gemini-3.5-flash-lite"
+
+    for bad in (
+        "wakeword: {follow_up_s: -1}",
+        "gemini: {thinking_level: huge}",
+        "gemini: {timeout_s: 0}",
+        "gemini: {modle: x}",
+    ):
+        good.write_text(bad + "\n")
+        with pytest.raises(ConfigError):
+            load_settings(good, tmp_path / ".env", environ={})

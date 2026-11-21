@@ -116,24 +116,64 @@ python main.py --list-voices
 
 ### Available Commands
 
-After saying the wake word, you can use these commands:
+After saying the wake word, you can use these commands. Commands must be the **whole** utterance:
+"volume 40" works, "I said volume 40 yesterday" does nothing. Numbers can be spoken ("forty") or
+digits, and "please" / "can you" in front are ignored. Anything that isn't a fixed command goes
+to the Gemini assistant (see below) when `GEMINI_API_KEY` is set; otherwise GRACE says it didn't
+understand.
 
-- **System Control**:
-  - "Open [application]" - Opens specified application
-  - "Open [website]" - Opens a website in your default browser
-  - "Type [text]" - Types the specified text
-  - "Click" / "Double click" / "Right click" - Performs mouse clicks
-  - "Scroll up/down" - Scrolls the current window
-  - "Copy" / "Paste" / "Select all" - Performs clipboard operations
-  - "Undo" / "Redo" - Performs undo/redo operations
-  - "Save" - Triggers save operation
-  - "Close window/tab" - Closes current window or tab
-  - "Screenshot" - Takes a screenshot
-  - "Change brightness [1-100]" - Adjusts the screen brightness level
-  - "Volume up/down" - Increases or decreases system volume
-  - "Volume up/down [amount]" - Changes volume by specified amount
-  - "Set volume [0-100]" - Sets the system volume to specified level
-  - "Shut down" - Immediately shuts down your computer
+**Follow-up commands:** say the wake word once, then keep going: "open notepad", "type Hello,
+World!", "close this window". You can also say the command in the same breath as the wake word
+("listen, open notepad"). GRACE keeps listening until you pause for `wakeword.follow_up_s` seconds
+(default 10; `0` = wake word before every command), or until you say "stop listening" / "that's
+all". It waits until it has finished speaking before it listens, so it doesn't hear itself.
+
+- **Volume and brightness** (exact values, 0-100; out-of-range values are clamped):
+  - "Volume 40" / "Set the volume to 70 percent" / "Volume max"
+  - "Volume up" / "Volume down 20" / "Turn the volume up a lot" / "A bit louder" / "Quieter"
+  - "Mute" / "Unmute" / "What's the volume?"
+  - "Brightness 60" / "Set brightness to 70 percent" / "Brightness down a lot" / "Dim the screen"
+- **Mouse and keyboard**:
+  - "Click" / "Double click" / "Right click"
+  - "Scroll down" / "Scroll up a little" / "Scroll down a lot" / "Scroll down 5 times"
+  - "Type [text]" - Types the text exactly as heard
+  - "Press enter" / "Press control plus c" / "Press alt f4"
+  - "Copy" / "Paste" / "Cut" / "Select all" / "Undo" / "Redo" / "Save" / "Find" / "Refresh"
+  - "Minimize" / "Maximize" / "Switch window" / "Show desktop" / "New tab"
+- **Apps and windows**:
+  - "Open notepad" / "Launch chrome" / "Open youtube" / "Go to github dot com"
+    (known apps and sites, or anything that looks like a web address)
+  - "Close this window" / "Close tab"
+  - "Take a screenshot" - Saved to `Pictures\GRACE`
+- **Power (risky)**: only these exact phrases, and only after confirmation:
+  - "Shut down the computer" / "Restart the computer" / "Put the computer to sleep"
+  - GRACE asks "Confirm shutdown? Say yes or press Ctrl+Alt+Y." Say **"yes"** or press
+    **Ctrl+Alt+Y** (configurable: `hotkeys.confirm` in `settings.yaml`) within 8 seconds.
+    "No", any other command, or the timeout cancels.
+
+The full vocabulary (synonyms, shortcuts, key names) is in `grace/intent/synonyms.yaml`.
+
+### Gemini assistant (optional)
+
+With `GEMINI_API_KEY` in `.env`, speech that isn't a fixed command goes to Gemini
+(`gemini.model` in `settings.yaml`, default `gemini-3.5-flash-lite`):
+
+| Ask | What happens | Gemini tier needed |
+|---|---|---|
+| "What's the capital of France?" / "And its population?" | Short spoken answer; remembers the conversation ("start over" forgets it) | Free |
+| "Turn the volume down a bit and open youtube" | Tool calling: Gemini uses GRACE's actions (volume, apps, keys, typing...) | Free |
+| "Search the web for today's weather in Delhi" | Google Search grounding; sources printed in the console | **Billing-enabled key** |
+| "Generate an image of a cat in sunglasses" | Image saved to `Pictures\GRACE` and opened | **Billing-enabled key** |
+| "Analyze the code" / "Debug this code" | Selected code is reviewed by Gemini | Free |
+
+- Google gives **no free quota** for search grounding or image generation. On a free key GRACE
+  says so instead of failing silently. Turn them off with `gemini.web_search: false` /
+  `gemini.image_generation: false`.
+- Gemini can **never** shut down, restart or sleep the computer. Those stay exact-phrase +
+  confirmation only.
+- Privacy: what you say to the assistant, and code you ask it to analyze, is sent to Google.
+  Free-tier inputs may be used to improve Google's models. Action results sent back to Gemini
+  are only the spoken message (e.g. "Copied."), never clipboard contents.
 
 - **Text Input**:
   - "Dictate" - Starts dictation mode
@@ -153,9 +193,8 @@ After saying the wake word, you can use these commands:
 
 ### Using Execute Commands
 
-To execute commands immediately:
-1. Add "execute" at the end of a command: "open notepad execute"
-2. Or start with "execute": "execute open notepad"
+The old habit of adding "execute" still works: "open notepad execute" and "execute open notepad"
+both run "open notepad". Only a whole leading or trailing word "execute" is removed.
 
 ## Screen Reading and Code Analysis Features
 
@@ -238,16 +277,23 @@ GRACE Voice Agent is built with a modular architecture consisting of:
 
 1. **Speech Recognition Module**: Handles wake word detection and speech-to-text
 2. **Text-to-Speech Module**: Provides voice output
-3. **System Control Module**: Interfaces with the operating system
-4. **Screen Reader Module**: Captures and analyzes screen content
-5. **Main Controller**: Orchestrates interactions between modules
+3. **Command grammar** (`grace/intent/grammar.py`): turns a whole utterance into an Intent; no
+   keyword-contains matching
+4. **Action registry** (`grace/actions/`): the only code that touches the OS (volume via pycaw,
+   brightness via screen-brightness-control, mouse/keyboard, apps, power). Risky actions run only
+   through the confirmation gate (`grace/actions/confirmation.py`)
+5. **Screen Reader Module**: Captures and analyzes screen content
+6. **Main Controller** (`main.py`): wake word -> grammar -> registry
 
 ## Extending GRACE
 
 You can extend GRACE by:
 
-1. Adding new commands in the `commands` dictionary in `GraceVoiceAgent` class
-2. Creating command handlers with the naming convention `_handle_X_command`
+1. Adding an action: register a handler with a pydantic args model in `grace/actions/`
+   (`registry.register("name", ArgsModel, risky=...)`), with a fake backend for tests
+2. Adding phrases: fixed phrases and synonyms go in `grace/intent/synonyms.yaml`; patterns with
+   arguments go in `RULES` in `grace/intent/grammar.py`. Add positive AND negative cases to
+   `tests/test_grammar.py`
 3. Adding specialized modules for domain-specific tasks
 
 ## License

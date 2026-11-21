@@ -156,6 +156,17 @@ Only unmatched or conversational input goes to the router.
 | OpenRouter | a `:free` model | 20 req/min, 50/day | Last resort |
 | Local | Gemma-4-E4B Q4_K_M via llama-server | Unlimited; ~9–10 tokens/s on a 4-core AVX2 CPU (benchmark, not our machine) | Offline + demo mode |
 
+**Added early (2026-11-21, on the team's request, before S07):** a Gemini assistant in
+`grace/intent/assistant.py` + `providers.py` answers unmatched speech in the legacy `main.py` loop:
+questions with memory, tool calling over the registry (risky actions never exposed), web search
+(Google Search grounding) and image generation (`gemini-3.1-flash-image`). It calls the Gemini
+**Interactions API** (`/v1beta/interactions`) with the pinned httpx; no new dependency. Verified:
+text + tool calling are free on `gemini-3.5-flash-lite`; search grounding and image generation
+have **no free tier** (HTTP 429 `limit: 0`), so they conflict with "zero running cost" unless the
+team uses a billing-enabled key. S07 should fold this into the router's provider chain rather than
+build a second Gemini client. Image generation re-enters scope by team decision (section 5 had
+removed it).
+
 Router behaviour: 3 s timeout (cloud), 15 s (local); HTTP 429/error → provider cooldown 60 s → next.
 Keep system prompt + tool list byte-identical across calls so llama-server reuses its prompt cache.
 Expose 8–10 grouped tools, not one per command. Demo mode pins provider order to `[local]`.

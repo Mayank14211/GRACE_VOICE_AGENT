@@ -14,6 +14,8 @@ REDACTED = "[REDACTED]"
 # Name -> pattern. The look-behinds stop matches inside ordinary words ("task-runner-...").
 SECRET_PATTERNS: dict[str, re.Pattern[str]] = {
     "google_api_key": re.compile(r"AIza[0-9A-Za-z_\-]{35}"),
+    # Newer Google AI Studio keys: "AQ." + ~50 URL-safe characters.
+    "google_auth_key": re.compile(r"(?<![A-Za-z0-9])AQ\.[A-Za-z0-9_\-]{40,}"),
     # OpenAI, OpenRouter (sk-or-v1-...), Stability and other sk- style keys.
     "sk_key": re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{20,}"),
     "huggingface_token": re.compile(r"(?<![A-Za-z0-9])hf_[A-Za-z0-9]{30,}"),

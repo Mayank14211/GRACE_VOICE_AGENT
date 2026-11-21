@@ -2,7 +2,7 @@
 
 Usage:
     uv run python scripts/doctor.py               # full check (opens mic + camera briefly)
-    uv run python scripts/doctor.py --no-hardware # skip mic/camera (CI, remote shells)
+    uv run python scripts/doctor.py --no-hardware # skip mic/camera/volume/brightness
 
 Exit code 0 when nothing FAILs. WARN never fails the run. Features that are not built yet
 report "not configured". Secret values are never printed: only key names.
@@ -60,6 +60,8 @@ IMPORTS: tuple[tuple[str, str, bool], ...] = (
     ("dotenv", "python-dotenv", False),
     ("yaml", "PyYAML", False),
     ("grace.config", "grace (config)", False),
+    ("grace.actions", "grace (action registry)", False),
+    ("grace.intent.grammar", "grace (command grammar)", False),
 )
 
 # Model files: (relative path under models/, expected sha256). Filled in from M5 onward.
@@ -260,6 +262,79 @@ def check_settings(settings_path: Path | None = None, env_path: Path | None = No
     return results
 
 
+def check_grammar() -> Result:
+    """synonyms.yaml compiles and every intent it can produce has a handler (no hardware)."""
+    from grace.actions import create_fake_registry
+    from grace.intent.grammar import RULES, GrammarError, default_grammar
+    from grace.intent.types import APP_INTENTS
+
+    try:
+        grammar = default_grammar()
+    except GrammarError as exc:
+        return Result("command grammar", FAIL, str(exc))
+    registry, _ = create_fake_registry()
+    names = {r.intent for r in RULES} | {n for n, _ in grammar.phrases} | {"input.type"}
+    missing = sorted(n for n in names if n not in registry and n not in APP_INTENTS)
+    if missing:
+        return Result("command grammar", FAIL, f"intents without a handler: {missing}")
+    risky = sorted(s.name for s in registry if s.risky)
+    detail = (
+        f"{len(grammar.phrases) + len(grammar.shortcuts) + len(grammar.rules)} patterns, "
+        f"{len(registry.names())} actions, risky: {', '.join(risky)}"
+    )
+    return Result("command grammar", PASS, detail)
+
+
+def check_assistant(settings_path: Path | None = None, env_path: Path | None = None) -> Result:
+    """Gemini assistant config and tool list (no network call; Gemini is optional)."""
+    from grace.actions import create_fake_registry
+    from grace.config import ConfigError, load_settings
+    from grace.intent.assistant import registry_tools
+
+    try:
+        settings = load_settings(settings_path, env_path)
+    except ConfigError:
+        return Result("gemini assistant", NOT_CONFIGURED, "settings.yaml invalid (see above)")
+    tools, names = registry_tools(create_fake_registry()[0])
+    if any(create_fake_registry()[0].is_risky(a) for a in names.values()):
+        return Result("gemini assistant", FAIL, "a risky action is exposed to the LLM")
+    if "gemini" not in settings.enabled_providers():
+        return Result("gemini assistant", NOT_CONFIGURED, "GEMINI_API_KEY not set in .env")
+    g = settings.gemini
+    extras = [n for n, on in (("web search", g.web_search), ("images", g.image_generation)) if on]
+    detail = f"{g.model}, {len(tools)} action tools"
+    if extras:
+        detail += f"; {' + '.join(extras)} need a billing-enabled key"
+    return Result("gemini assistant", PASS, detail)
+
+
+def check_volume() -> Result:
+    """Read (never change) the default playback device's volume through pycaw."""
+    if not IS_WINDOWS:
+        return Result("volume (pycaw)", WARN, "Windows-only; skipped")
+    try:
+        from grace.actions.system import PycawVolume
+
+        vol = PycawVolume()
+        muted = " (muted)" if vol.is_muted() else ""
+        return Result(
+            "volume (pycaw)", PASS, f"default playback device at {vol.get_level()}%{muted}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        return Result("volume (pycaw)", FAIL, f"{type(exc).__name__}: {exc}")
+
+
+def check_brightness() -> Result:
+    """Read (never change) display 0's brightness. WARN, not FAIL: desktops often have no
+    software-controllable monitor."""
+    try:
+        from grace.actions.system import SbcBrightness
+
+        return Result("brightness", PASS, f"display 0 at {SbcBrightness().get_level()}%")
+    except Exception as exc:  # noqa: BLE001
+        return Result("brightness", WARN, f"not controllable: {exc}")
+
+
 def check_not_built(features: Iterable[str] = NOT_BUILT) -> list[Result]:
     return [Result(feature, NOT_CONFIGURED) for feature in features]
 
@@ -275,9 +350,11 @@ def run_checks(hardware: bool = True) -> list[Result]:
         check_imports,
         check_mediapipe_legacy_hands,
         check_tesseract,
+        check_grammar,
+        check_assistant,
     ]
     if hardware:
-        checks += [check_microphone, check_camera]
+        checks += [check_microphone, check_camera, check_volume, check_brightness]
     checks += [check_models, check_env, check_settings, check_not_built]
 
     results: list[Result] = []
@@ -291,6 +368,8 @@ def run_checks(hardware: bool = True) -> list[Result]:
         results += [
             Result("microphone", WARN, "skipped (--no-hardware)"),
             Result("camera", WARN, "skipped (--no-hardware)"),
+            Result("volume (pycaw)", WARN, "skipped (--no-hardware)"),
+            Result("brightness", WARN, "skipped (--no-hardware)"),
         ]
     return results
 
@@ -306,7 +385,9 @@ def format_results(results: list[Result]) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check the GRACE environment.")
     parser.add_argument(
-        "--no-hardware", action="store_true", help="skip microphone and camera checks"
+        "--no-hardware",
+        action="store_true",
+        help="skip microphone, camera, volume and brightness checks",
     )
     parser.add_argument("--json", action="store_true", help="print results as JSON")
     args = parser.parse_args(argv)

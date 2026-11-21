@@ -40,6 +40,8 @@ wakeword:
   enabled: true                          # false = hotkeys / push-to-talk only
   model_path: models/wakeword/grace.onnx # openWakeWord model, relative to the repo root
   threshold: 0.5                         # detection score (0-1); lower = more sensitive
+  follow_up_s: 10.0                      # keep listening for follow-ups this long after a command
+                                         # (0 = wake word before every command)
 
 gestures:
   camera_index: 0         # webcam index (0 = default camera)
@@ -61,3 +63,18 @@ router:
   local:
     enabled: false        # true once llama-server is running (scripts/run_llama_server.ps1)
     base_url: http://127.0.0.1:8080/v1
+
+gemini:
+  # Assistant for anything the fixed commands don't cover: questions, "search the web for ...",
+  # "generate an image of ...", and multi-step requests that use GRACE's actions (tool calling).
+  # Needs GEMINI_API_KEY in .env. Free tier: text answers + tool calling.
+  # Web search and image generation need a key from a BILLING-ENABLED project (no free quota).
+  # Risky actions (shutdown, restart, sleep) are never available to the model.
+  model: gemini-3.5-flash-lite          # text + tool calling
+  image_model: gemini-3.1-flash-image   # "Nano Banana 2"; images saved to Pictures/GRACE
+  web_search: true                      # Google Search grounding
+  image_generation: true
+  thinking_level: low                   # minimal | low | medium | high (higher = slower)
+  timeout_s: 20.0                       # per request
+  image_timeout_s: 90.0                 # image generation is slower
+  memory_reset_s: 600.0                 # forget the conversation after this long (0 = never)

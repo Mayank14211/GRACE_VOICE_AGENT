@@ -7,6 +7,20 @@ import numpy as np
 import time
 import wave
 import threading
+import re
+
+
+def split_wake_word(text, wake_word):
+    """Return what was said after the wake word, or None if the wake word wasn't said.
+
+    The wake word must be a whole word ("listen", not "listening"); case is ignored.
+    "Listen, open notepad" -> "open notepad"; "listen" -> "".
+    """
+    if not text or not wake_word:
+        return None
+    m = re.search(rf"\b{re.escape(wake_word)}\b[\s,.!?:]*(?P<rest>.*)", text, re.I | re.S)
+    return m.group("rest").strip() if m else None
+
 
 class SpeechRecognizer:
     def __init__(self, api="google", openai_api_key=None, adjustment_time=0.2, timeout=3):
@@ -58,8 +72,9 @@ class SpeechRecognizer:
     def transcribe_audio(self, audio):
         """Transcribe audio data using the selected API"""
         try:
+            # Case is kept so "type Hello" types "Hello"; the grammar normalises commands itself.
             if self.api == "google":
-                text = self.recognizer.recognize_google(audio).lower()
+                text = self.recognizer.recognize_google(audio)
             elif self.api == "whisper_api" and self.openai_api_key:
                 # Export audio to a temporary file
                 temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
@@ -81,20 +96,16 @@ class SpeechRecognizer:
                 # Remove temporary file
                 os.unlink(temp_file.name)
                 
-                text = transcription.text.lower()
+                text = transcription.text
             elif self.api == "sphinx":
-                text = self.recognizer.recognize_sphinx(audio).lower()
+                text = self.recognizer.recognize_sphinx(audio)
             else:
                 print(f"Unsupported API: {self.api}, falling back to Google")
-                text = self.recognizer.recognize_google(audio).lower()
-            
-            # Special handling for commands ending with "execute"
-            # Sometimes speech recognition may not properly space "execute"
-            if "execute" in text:
-                # Fix cases like "openexecute" -> "open execute"
-                for cmd in ["open", "type", "click", "read", "scroll", "copy", "paste", "save"]:
-                    if cmd + "execute" in text:
-                        text = text.replace(cmd + "execute", cmd + " execute")
+                text = self.recognizer.recognize_google(audio)
+
+            # STT sometimes glues "execute" onto the previous word ("openexecute").
+            text = re.sub(r"\b(open|type|click|read|scroll|copy|paste|save)execute\b",
+                          r"\1 execute", text, flags=re.I)
             
             print(f"Recognized: {text}")
             return text
@@ -153,40 +164,38 @@ class SpeechRecognizer:
         self.listening_thread.start()
         
     def _wake_word_listener(self):
-        """Background thread for wake word detection"""
+        """Background thread for wake word detection.
+
+        The callback gets whatever was said after the wake word ("" if nothing), and runs
+        after this microphone is closed so the callback can open its own.
+        """
         print(f"Listening for wake word: '{self.wake_word}'")
-        
+
         while not self.stop_listening:
-            with sr.Microphone() as source:
-                self.recognizer.adjust_for_ambient_noise(source, duration=0.1)
-                try:
-                    # Shorter timeout and phrase time limit for more responsiveness
-                    audio = self.recognizer.listen(source, timeout=1, phrase_time_limit=3)  # Increased the phrase time limit to catch the full command
-                    try:
-                        text = self.recognizer.recognize_google(audio).lower()
-                        print(f"Heard: {text}")
-                        
-                        # Check if the wake word is in the text
-                        if self.wake_word in text:
-                            print(f"Wake word detected: {self.wake_word}")
-                            self.wake_word_detected = True
-                            
-                            # Extract any text after the wake word for command processing
-                            if self.wake_word_callback:
-                                self.wake_word_callback()
-                                
-                    except sr.UnknownValueError:
-                        # Speech not understood, continue listening
-                        pass
-                    except sr.RequestError:
-                        # API error, wait and retry
-                        time.sleep(0.5)  # Reduced wait time
-                except:
-                    # Timeout or other error, continue
-                    pass
-                    
-            time.sleep(0.05)  # Reduced sleep time for more responsiveness
-    
+            text = None
+            try:
+                with sr.Microphone() as source:
+                    self.recognizer.adjust_for_ambient_noise(source, duration=0.1)
+                    # Long enough for "listen, open notepad" in one breath.
+                    audio = self.recognizer.listen(source, timeout=1, phrase_time_limit=5)
+                text = self.recognizer.recognize_google(audio)
+                print(f"Heard: {text}")
+            except sr.UnknownValueError:
+                pass  # speech not understood, keep listening
+            except sr.RequestError:
+                time.sleep(0.5)  # STT service error, retry shortly
+            except Exception:
+                pass  # timeout waiting for speech, mic hiccup
+
+            rest = split_wake_word(text, self.wake_word)
+            if rest is not None:
+                print(f"Wake word detected: {self.wake_word}")
+                self.wake_word_detected = True
+                if self.wake_word_callback:
+                    self.wake_word_callback(rest)
+
+            time.sleep(0.05)
+
     def stop_wake_word_detection(self):
         """Stop wake word detection"""
         self.stop_listening = True
@@ -250,8 +259,8 @@ if __name__ == "__main__":
     print(f"You said: {text}")
     
     # Test wake word detection
-    def on_wake_word():
-        print("Wake word callback triggered!")
+    def on_wake_word(rest=""):
+        print(f"Wake word callback triggered! Rest: {rest!r}")
         
     print("\nTesting wake word detection. Say 'Jarvis' to trigger.")
     recognizer.start_wake_word_detection("jarvis", on_wake_word)
