@@ -11,37 +11,59 @@ GRACE (General-purpose Responsive Assistant for Computer Environment) is an AI-p
 - **Wake Word Detection**: Activate with customizable wake word (default: "listen")
 - **Dictation Mode**: Type continuously using voice
 
+> Project plan and roadmap: [docs/PLAN.md](docs/PLAN.md) (source of truth).
+
 ## Requirements
 
-- Python 3.7+
-- Windows 10/11, macOS, or Linux
-- Microphone
-- Internet connection (for speech recognition)
+- Windows 10/11, 64-bit
+- Python 3.11 (64-bit) — managed by [uv](https://docs.astral.sh/uv/)
+- Microphone and webcam
+- Internet connection (the legacy speech recognition uses Google web STT)
 - Tesseract OCR (for screen reading)
 
 ## Installation
 
-1. Clone this repository:
-```bash
-git clone https://github.com/yourusername/grace-voice-agent.git
-cd grace-voice-agent
+1. Install uv (once per machine):
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-2. Install the required Python packages:
-```bash
-pip install -r requirements.txt
+2. Clone this repository and install the locked dependencies:
+```powershell
+git clone <repo-url> GRACE_VOICEAGENT
+cd GRACE_VOICEAGENT
+uv sync
+```
+`uv sync` downloads Python 3.11 if it is missing, creates `.venv/` and installs exactly what
+`uv.lock` pins. `requirements.txt` is exported from the lock for tools that need it
+(`uv export --format requirements-txt --no-dev --no-hashes --no-emit-project -o requirements.txt`);
+do not edit it by hand.
+
+3. Check the environment (opens the mic and camera briefly; add `--no-hardware` to skip them):
+```powershell
+uv run python scripts/doctor.py
 ```
 
-3. Install Tesseract OCR:
+4. Run the tests:
+```powershell
+uv run pytest -m "not hardware and not network"   # everyday / CI
+uv run pytest -m hardware                          # on the base machine, mic + camera attached
+uv run ruff check .
+```
+
+Adding a dependency: confirm a cp311 win_amd64 wheel exists, then
+`uv add <pkg>==<version>`, `uv lock`, `uv pip check`, and re-export `requirements.txt`.
+
+5. Install Tesseract OCR:
    - **Windows**: Download and install from [Tesseract at UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki)
    - **macOS**: `brew install tesseract`
    - **Linux**: `sudo apt install tesseract-ocr`
 
-4. Make sure to add Tesseract to your system PATH.
+6. Make sure to add Tesseract to your system PATH.
 
-5. Verify Tesseract installation:
+7. Verify Tesseract installation:
 ```bash
-python tesseract_check.py
+uv run python tesseract_check.py
 ```
 
 ## Usage
@@ -49,7 +71,13 @@ python tesseract_check.py
 Run the main application:
 
 ```bash
-python main.py
+uv run python main.py
+```
+
+Run the standalone hand-gesture controller:
+
+```bash
+uv run python Hand_Gesture.py
 ```
 
 You can customize the wake word and API keys:
@@ -95,10 +123,6 @@ After saying the wake word, you can use these commands:
 - **Code Analysis**:
   - "Analyze code" - Analyzes selected code
   - "Debug code" - Debugs selected code
-
-- **AI Generation**:
-  - "Generate image [prompt]" - Creates an AI-generated image based on your description
-  - "Generate [prompt]" - Alternative command for image generation
 
 - **General**:
   - "Help" - Lists available commands
@@ -148,24 +172,6 @@ Example:
 1. Select some code in your editor
 2. Say "listen analyze code"
 3. The assistant will explain what your code does
-
-## AI Generation Features
-
-### Image Generation
-
-GRACE can generate images using AI models based on your text descriptions:
-
-1. Simply say "generate image of [your description]" or "generate [your description]"
-2. The AI will process your request and create an image
-3. The image will be saved in the "Gen_images" directory and displayed automatically
-
-For example:
-- "Generate image of a sunset over mountains"
-- "Generate a red dragon flying over a castle"
-
-For this feature to work, you need to provide a valid Gemini API key when starting the application.
-
-Note: Image generation requires internet access and the quality of generated images depends on the description and the AI model used.
 
 ## Troubleshooting
 

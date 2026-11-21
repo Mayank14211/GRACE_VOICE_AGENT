@@ -17,11 +17,6 @@ import webbrowser
 # Add import for screen brightness control
 import subprocess
 import datetime
-import requests
-import json
-import base64
-from PIL import Image
-import io
 import traceback
 
 # Import our custom modules
@@ -31,15 +26,13 @@ from screen_reader import ScreenReader
 from system_control import SystemControl
 
 class GraceVoiceAgent:
-    def __init__(self, gemini_api_key=None, openai_api_key=None, wake_word="jarvis", stability_key=None, huggingface_token=None):
+    def __init__(self, gemini_api_key=None, openai_api_key=None, wake_word="jarvis"):
         """Initialize the voice agent
         
         Args:
             gemini_api_key (str, optional): API key for Gemini AI
             openai_api_key (str, optional): API key for OpenAI's Whisper
             wake_word (str): Wake word to activate the agent
-            stability_key (str, optional): API key for Stability AI image generation
-            huggingface_token (str, optional): Token for Hugging Face API
         """
         print("Initializing GRACE Voice Agent...")
         
@@ -57,13 +50,6 @@ class GraceVoiceAgent:
         
         # Store API keys
         self.gemini_api_key = gemini_api_key
-        self.stability_key = stability_key or "sk-P6PMgcLLAvVFvZs7u2MdKbx7TEJmQV4eAMuMWgcve2l9euEM"
-        self.huggingface_token = huggingface_token or "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"
-        
-        # Create directory for generated images
-        self.gen_images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Gen_images")
-        os.makedirs(self.gen_images_dir, exist_ok=True)
-        
         # Agent state
         self.is_running = False
         self.is_listening = False
@@ -98,8 +84,6 @@ class GraceVoiceAgent:
             "volume down": self._handle_volume_down_command,
             "decrease volume": self._handle_volume_down_command,
             "set volume": self._handle_set_volume_command,
-            "generate image": self._handle_generate_image_command,
-            "generate": self._handle_generate_image_command,
             "shut down": self._handle_shutdown_command,
             "shutdown": self._handle_shutdown_command,
             "shut": self._handle_shutdown_command,
@@ -579,7 +563,6 @@ class GraceVoiceAgent:
         help_text += "- Change Brightness [1-100]: Adjusts screen brightness\n"
         help_text += "- Volume Up/Down: Increases or decreases system volume\n"
         help_text += "- Set Volume [1-100]: Sets system volume to a specific level\n"
-        help_text += "- Generate Image [prompt]: Creates an AI image from your description\n"
         help_text += "- Shut Down: Shuts down your computer\n"
         help_text += "- Exit/Quit: Exits the application\n"
         help_text += "- Help: Shows this help message\n\n"
@@ -985,183 +968,6 @@ class GraceVoiceAgent:
                 print(f"Linux volume setting error with pactl: {e2}")
                 raise
 
-    def _handle_generate_image_command(self, args=""):
-        """Handle 'generate image' command to create AI-generated images
-        
-        Args:
-            args (str, optional): Image description/prompt
-        """
-        if not args:
-            self.tts.speak_async("Please provide a description for the image you want to generate.")
-            return
-            
-        if not self.stability_key and not self.huggingface_token:
-            self.tts.speak_async("Image generation requires valid API keys for Stability AI or Hugging Face.")
-            return
-            
-        try:
-            self.tts.speak_async(f"Generating image of {args}. This may take a moment...")
-            
-            # Try using Stability AI API first
-            image_path = None
-            if self.stability_key:
-                self.tts.speak_async("Using Stability AI to generate your image...")
-                image_path = self._generate_image_with_stable_diffusion(args)
-            
-            # If Stability AI fails, try Hugging Face
-            if not image_path and self.huggingface_token:
-                self.tts.speak_async("Trying alternative method with Hugging Face...")
-                image_path = self._generate_image_with_huggingface(args)
-            
-            if image_path:
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                # Create a sanitized filename from the prompt
-                sanitized_prompt = re.sub(r'[^\w\s-]', '', args)[:50]  # Truncate to 50 chars
-                sanitized_prompt = re.sub(r'\s+', '_', sanitized_prompt.strip())
-                
-                # Save path
-                filename = os.path.join(self.gen_images_dir, f"{sanitized_prompt}_{timestamp}.png")
-                
-                # If image_path is a URL, download it
-                if image_path.startswith('http'):
-                    # Download and save the image
-                    response = requests.get(image_path, stream=True)
-                    if response.status_code == 200:
-                        with open(filename, 'wb') as f:
-                            for chunk in response.iter_content(1024):
-                                f.write(chunk)
-                else:
-                    # It's a local file path, so copy/rename it
-                    if os.path.exists(image_path):
-                        # Read and write the image to ensure it's a proper image file
-                        with Image.open(image_path) as img:
-                            img.save(filename)
-                    
-                # Announce and open the image
-                self.tts.speak_async(f"Image generated and saved to {filename}")
-                
-                # Try to open the image
-                try:
-                    os.startfile(filename)  # Works on Windows
-                except:
-                    try:
-                        # Try platform-specific methods
-                        if platform.system() == "Darwin":  # macOS
-                            subprocess.run(["open", filename], check=True)
-                        else:  # Linux
-                            subprocess.run(["xdg-open", filename], check=True)
-                    except:
-                        pass  # Silently fail if we can't open it
-            else:
-                self.tts.speak_async("Image generation failed. Please try again with a different description.")
-        except Exception as e:
-            print(f"Error in image generation: {e}")
-            self.tts.speak_async("There was an error generating the image. Please try again.")
-    
-    def _generate_image_with_stable_diffusion(self, prompt):
-        """Generate an image using Stability AI's API
-        
-        Args:
-            prompt (str): Image description
-        
-        Returns:
-            str: Path to the generated image or None if failed
-        """
-        try:
-            # API endpoint for Stability AI
-            api_url = "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image"
-            
-            # Headers with the correct API key
-            headers = {
-                "Authorization": f"Bearer {self.stability_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            }
-            
-            # Parameters for the image generation
-            data = {
-                "text_prompts": [
-                    {
-                        "text": prompt
-                    }
-                ],
-                "cfg_scale": 7,
-                "height": 1024,
-                "width": 1024,
-                "samples": 1,
-                "steps": 30
-            }
-            
-            # Call the API
-            print(f"Calling Stability AI API with prompt: {prompt[:50]}...")
-            response = requests.post(api_url, headers=headers, json=data)
-            
-            # Check response
-            if response.status_code == 200:
-                response_data = response.json()
-                
-                # Check if we got any artifacts back
-                if "artifacts" in response_data and len(response_data["artifacts"]) > 0:
-                    # Get the image data
-                    image_data = response_data["artifacts"][0]["base64"]
-                    
-                    # Save the image
-                    temp_path = os.path.join(self.gen_images_dir, "temp_stability.png")
-                    with open(temp_path, "wb") as f:
-                        f.write(base64.b64decode(image_data))
-                    
-                    print(f"Stability AI image saved to {temp_path}")
-                    return temp_path
-            else:
-                print(f"Stability AI API error: {response.status_code}, {response.text[:200]}")
-            
-            return None
-        except Exception as e:
-            print(f"Error with Stability AI API: {e}")
-            return None
-    
-    def _generate_image_with_huggingface(self, prompt):
-        """Generate an image using HuggingFace Inference API
-        
-        Args:
-            prompt (str): Image description
-        
-        Returns:
-            str: Path to the generated image or None if failed
-        """
-        try:
-            # HuggingFace API endpoint
-            api_url = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-2"
-            
-            # Headers with the correct token
-            headers = {
-                "Authorization": f"Bearer {self.huggingface_token}"
-            }
-            
-            # Request data (just the prompt)
-            data = {"inputs": prompt}
-            
-            # Call the API
-            print(f"Calling Hugging Face API with prompt: {prompt[:50]}...")
-            response = requests.post(api_url, headers=headers, json=data)
-            
-            # Check if the request was successful
-            if response.status_code == 200:
-                # Save the image
-                temp_path = os.path.join(self.gen_images_dir, "temp_huggingface.png")
-                with open(temp_path, "wb") as f:
-                    f.write(response.content)
-                
-                print(f"Hugging Face image saved to {temp_path}")
-                return temp_path
-            else:
-                print(f"Hugging Face API error: {response.status_code}, {response.text[:200]}")
-            
-            return None
-        except Exception as e:
-            print(f"Error with Hugging Face API: {e}")
-            return None
-
     def _handle_shutdown_command(self, args=""):
         """Handle 'shut down' command to power off the computer
         
@@ -1220,10 +1026,6 @@ def main():
                         help='Gemini API key')
     parser.add_argument('--openai-key', type=str, default=None,
                         help='OpenAI API key (for Whisper)')
-    parser.add_argument('--stability-key', type=str, default="sk-P6PMgcLLAvVFvZs7u2MdKbx7TEJmQV4eAMuMWgcve2l9euEM",
-                        help='Stability AI API key for image generation')
-    parser.add_argument('--huggingface-token', type=str, default="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",
-                        help='Hugging Face token for image generation')
     parser.add_argument('--wake-word', type=str, default="listen",
                         help='Wake word to activate the agent')
     parser.add_argument('--voice-index', type=int, default=None,
@@ -1252,9 +1054,7 @@ def main():
     agent = GraceVoiceAgent(
         gemini_api_key=args.gemini_key,
         openai_api_key=args.openai_key,
-        wake_word=args.wake_word,
-        stability_key=args.stability_key,
-        huggingface_token=args.huggingface_token
+        wake_word=args.wake_word
     )
     
     # Set the voice if specified

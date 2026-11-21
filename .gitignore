@@ -1,1 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
 
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Models and runtime output (downloaded with hash checks, never committed)
+models/
+logs/
+*.gguf
+*.onnx
+!tests/fixtures/**/*.onnx
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+tempCodeRunnerFile*.py
