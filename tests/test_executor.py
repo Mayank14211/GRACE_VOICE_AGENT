@@ -110,3 +110,98 @@ def test_stop_without_start_and_double_stop() -> None:
     ex.start()
     ex.stop()
     ex.stop()
+
+
+# --------------------------------------------------------------------------- S05: call / facade
+def test_call_waits_behind_submitted_intents_on_the_executor_thread() -> None:
+    registry, b = create_fake_registry()
+    threads: list[str] = []
+    ex = ActionExecutor(registry, lambda i, r: threads.append(threading.current_thread().name))
+    ex.start()
+    try:
+        ex.submit(g("input.mouse_down", button="left"))
+        ex.submit(g("input.mouse_up", button="left"))
+        result = ex.call(Intent("volume.set", {"level": 30}))
+    finally:
+        ex.stop()
+    assert result.ok and b.volume.level == 30
+    # Voice and gesture ran on the same thread, in submission order.
+    assert b.input.calls == [("mouse_down", "left"), ("mouse_up", "left")]
+    assert set(threads) == {"grace-actions"} and len(threads) == 3
+
+
+def test_call_runs_inline_when_not_started() -> None:
+    registry, b = create_fake_registry()
+    assert ActionExecutor(registry).call(Intent("volume.set", {"level": 10})).ok
+    assert b.volume.level == 10
+
+
+def test_call_refuses_risky_unless_confirmed() -> None:
+    registry, b = create_fake_registry()
+    ex = ActionExecutor(registry).start()
+    try:
+        assert not ex.call(Intent("system.shutdown")).ok
+        assert b.power.calls == []
+        assert ex.call(Intent("system.shutdown"), confirmed=True).ok
+    finally:
+        ex.stop()
+    assert b.power.calls == ["shutdown"]
+
+
+@pytest.mark.timeout(5)
+def test_call_from_a_handler_on_the_executor_thread_does_not_deadlock() -> None:
+    registry, _ = create_fake_registry()
+    ex = ActionExecutor(registry)
+    inner: list[bool] = []
+
+    def on_result(intent: Intent, result: ActionResult) -> None:
+        if intent.name == "input.click":
+            inner.append(ex.call(Intent("volume.set", {"level": 5})).ok)
+
+    ex._on_result = on_result
+    ex.start()
+    try:
+        assert ex.call(g("input.click", button="left", count=1)).ok
+    finally:
+        ex.stop()
+    assert inner == [True]
+
+
+def test_clear_pending_drops_fire_and_forget_intents_only() -> None:
+    registry, b = create_fake_registry()
+    ex = ActionExecutor(registry)
+    for x in range(3):
+        ex.submit(g("input.move_to", x=x, y=0))
+        ex.submit(g("input.click", button="left", count=1))
+    assert ex.clear_pending() == 6
+    assert ex.run_pending() == 0 and b.input.calls == []
+
+
+def test_executor_registry_facade() -> None:
+    from grace.actions.executor import ExecutorRegistry
+
+    registry, b = create_fake_registry()
+    sources: list[str] = []
+    ex = ActionExecutor(registry, lambda i, r: sources.append(i.source)).start()
+    try:
+        facade = ExecutorRegistry(registry, ex, source="router")
+        assert "volume.set" in facade and facade.is_risky("system.shutdown")
+        assert facade.spec("volume.set").name == "volume.set"
+        assert {s.name for s in facade} == set(registry.names())
+        assert facade.execute("volume.set", {"level": 70}).ok
+    finally:
+        ex.stop()
+    assert b.volume.level == 70 and sources == ["router"]
+
+
+def test_release_all_releases_only_what_grace_holds() -> None:
+    registry, b = create_fake_registry()
+    first = registry.execute("input.release_all")
+    assert first.ok and first.data["released"] == []
+    registry.execute("input.mouse_down", {"button": "left"})
+    registry.execute("input.mouse_down", {"button": "right"})
+    registry.execute("input.mouse_up", {"button": "right"})
+    b.input.calls.clear()
+    result = registry.execute("input.release_all")
+    assert result.data["released"] == ["left"] and b.input.calls == [("mouse_up", "left")]
+    assert registry.execute("input.release_all").data["released"] == []
