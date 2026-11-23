@@ -43,4 +43,20 @@ Statuses: `Pending` (wanted, not scheduled) · `Planned (SNN)` (scheduled for a 
   - Positions are computed from the primary screen's available area, so S08 (polish) can move or
     make buttons draggable without touching callers.
 
-<!-- Add new entries above this line. Next ID: A-002 -->
+### A-002: On-screen gesture (camera) button
+
+- **Date / status:** 2026-11-23 · Done (S05)
+- **Request:** the same convenience as A-001 for gesture control, which also switches the camera
+  hardware on and off, so the user does not need Ctrl+Alt+G.
+- **Decision:** the hotkey stays, as for A-001. The button is a second route to
+  `Runtime.toggle_gestures(t, source="button")`.
+- **Where:** `GestureButton` in `grace/ui/overlay.py`, placed left of the mic button; setting
+  `runtime.gesture_button` (default on). Green camera = on, red slash = off, red ring = gestures
+  are on but the camera is missing or busy (`NO CAMERA`).
+- **Constraints for other work:**
+  - Buttons line up leftwards from the chip in `Overlay._place_buttons`; a new control is added
+    to `Overlay._buttons()` and nothing else about the layout changes.
+  - The camera is only open while gestures are on (`GestureLoop`); a button must never open or
+    close it directly, only call `Runtime`.
+
+<!-- Add new entries above this line. Next ID: A-003 -->
