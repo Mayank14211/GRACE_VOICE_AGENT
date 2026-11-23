@@ -1,0 +1,162 @@
+{"t": 1795294036.342, "kind": "gesture", "name": "NONE"}
+{"t": 1795294047.55, "kind": "gesture", "name": "MOVE"}
+{"t": 1795294050.146, "kind": "gesture", "name": "NONE"}
+{"t": 1795294051.257, "kind": "gesture", "name": "SCROLL"}
+{"t": 1795294051.875, "kind": "action", "name": "input.scroll", "args": {"direction": "down", "notches": 1}, "ok": true}
+{"t": 1795294052.17, "kind": "action", "name": "input.scroll", "args": {"direction": "down", "notches": 1}, "ok": true}
+{"t": 1795294052.43, "kind": "action", "name": "input.scroll", "args": {"direction": "down", "notches": 1}, "ok": true}
+{"t": 1795294052.729, "kind": "action", "name": "input.scroll", "args": {"direction": "down", "notches": 1}, "ok": true}
+{"t": 1795294053.04, "kind": "action", "name": "input.scroll", "args": {"direction": "down", "notches": 1}, "ok": true}
+{"t": 1795294054.206, "kind": "gesture", "name": "BRIGHTNESS"}
+{"t": 1795294055.31, "kind": "action", "name": "brightness.step", "args": {"delta": 1}, "ok": true}
+{"t": 1795294055.425, "kind": "action", "name": "brightness.step", "args": {"delta": 1}, "ok": true}
+{"t": 1795294055.561, "kind": "action", "name": "brightness.step", "args": {"delta": 2}, "ok": true}
+{"t": 1795294055.679, "kind": "action", "name": "brightness.step", "args": {"delta": 3}, "ok": true}
+{"t": 1795294055.822, "kind": "action", "name": "brightness.step", "args": {"delta": 3}, "ok": true}
+{"t": 1795294055.987, "kind": "action", "name": "brightness.step", "args": {"delta": 3}, "ok": true}
+{"t": 1795294056.116, "kind": "action", "name": "brightness.step", "args": {"delta": 2}, "ok": true}
+{"t": 1795294056.289, "kind": "action", "name": "brightness.step", "args": {"delta": 2}, "ok": true}
+{"t": 1795294056.385, "kind": "action", "name": "brightness.step", "args": {"delta": 2}, "ok": true}
+{"t": 1795294056.527, "kind": "action", "name": "brightness.step", "args": {"delta": 4}, "ok": true}
+{"t": 1795294056.634, "kind": "action", "name": "brightness.step", "args": {"delta": 1}, "ok": true}
+{"t": 1795294056.777, "kind": "action", "name": "brightness.step", "args": {"delta": 1}, "ok": true}
+{"t": 1795294057.447, "kind": "action", "name": "brightness.step", "args": {"delta": -1}, "ok": true}
+{"t": 1795294057.746, "kind": "action", "name": "brightness.step", "args": {"delta": -1}, "ok": true}
+{"t": 1795294058.251, "kind": "gesture", "name": "MOVE"}
+{"t": 1795294058.558, "kind": "gesture", "name": "SCROLL"}
+{"t": 1795294058.955, "kind": "gesture", "name": "VOLUME"}
+{"t": 1795294062.548, "kind": "action", "name": "volume.step", "args": {"delta": 1}, "ok": true}
+{"t": 1795294062.766, "kind": "gesture", "name": "NONE"}
+{"t": 1795294063.875, "kind": "gesture", "name": "VOLUME"}
+{"t": 1795294064.466, "kind": "gesture", "name": "NONE"}
+{"t": 1795294064.826, "kind": "gesture", "name": "MOVE"}
+{"t": 1795294065.386, "kind": "gesture", "name": "FIST"}
+{"t": 1795294068.371, "kind": "gesture", "name": "PAUSED"}
+{"t": 1795294080.48, "kind": "gesture", "name": "FIST"}
+{"t": 1795294084.099, "kind": "gesture", "name": "SCROLL"}
+{"t": 1795294084.627, "kind": "gesture", "name": "RIGHT CLICK"}
+{"t": 1795294084.627, "kind": "action", "name": "input.click", "args": {"button": "right", "count": 1}, "ok": true}
+{"t": 1795294087.039, "kind": "gesture", "name": "NONE"}
+{"t": 1795294088.657, "kind": "gesture", "name": "MOVE"}
+{"t": 1795294090.372, "kind": "gesture", "name": "CLICK"}
+{"t": 1795294090.993, "kind": "gesture", "name": "DRAG"}
+{"t": 1795294090.993, "kind": "action", "name": "input.mouse_down", "args": {"button": "left"}, "ok": true}
+{"t": 1795294091.778, "kind": "gesture", "name": "VOLUME"}
+{"t": 1795294091.778, "kind": "action", "name": "input.mouse_up", "args": {"button": "left"}, "ok": true}
+{"t": 1795294092.195, "kind": "gesture", "name": "CLICK"}
+{"t": 1795294092.604, "kind": "gesture", "name": "DRAG"}
+{"t": 1795294092.604, "kind": "action", "name": "input.mouse_down", "args": {"button": "left"}, "ok": true}
+{"t": 1795294093.915, "kind": "gesture", "name": "SCROLL"}
+{"t": 1795294093.915, "kind": "action", "name": "input.mouse_up", "args": {"button": "left"}, "ok": true}
+{"t": 1795294095.542, "kind": "gesture", "name": "BRIGHTNESS"}
+{"t": 1795294096.74, "kind": "action", "name": "brightness.step", "args": {"delta": 1}, "ok": true}
+{"t": 1795294097.243, "kind": "gesture", "name": "READY"}
+{"t": 1795294101.186, "kind": "gesture", "name": "FIST"}
+{"t": 1795294102.906, "kind": "gesture", "name": "PAUSED"}
+{"t": 1795404796.193, "kind": "gesture", "name": "NONE"}
+{"t": 1795404797.816, "kind": "gesture", "name": "READY"}
+{"t": 1795404799.344, "kind": "gesture", "name": "CLICK"}
+{"t": 1795404799.756, "kind": "gesture", "name": "MOVE"}
+{"t": 1795404799.757, "kind": "action", "name": "input.click", "args": {"button": "left", "count": 1}, "ok": true}
+{"t": 1795404801.629, "kind": "gesture", "name": "NONE"}
+{"t": 1795404801.821, "kind": "gesture", "name": "MOVE"}
+{"t": 1795404802.073, "kind": "gesture", "name": "NONE"}
+{"t": 1795404802.689, "kind": "gesture", "name": "MOVE"}
+{"t": 1795404802.981, "kind": "gesture", "name": "CLICK"}
+{"t": 1795404803.245, "kind": "gesture", "name": "MOVE"}
+{"t": 1795404803.245, "kind": "action", "name": "input.click", "args": {"button": "left", "count": 1}, "ok": true}
+{"t": 1795404803.689, "kind": "gesture", "name": "CLICK"}
+{"t": 1795404803.987, "kind": "gesture", "name": "MOVE"}
+{"t": 1795404803.987, "kind": "action", "name": "input.click", "args": {"button": "left", "count": 1}, "ok": true}
+{"t": 1795404804.361, "kind": "gesture", "name": "CLICK"}
+{"t": 1795404804.799, "kind": "gesture", "name": "VOLUME"}
+{"t": 1795404804.799, "kind": "action", "name": "input.click", "args": {"button": "left", "count": 1}, "ok": true}
+{"t": 1795404805.115, "kind": "gesture", "name": "SCROLL"}
+{"t": 1795404805.512, "kind": "action", "name": "input.scroll", "args": {"direction": "down", "notches": 1}, "ok": true}
+{"t": 1795404805.885, "kind": "action", "name": "input.scroll", "args": {"direction": "up", "notches": 1}, "ok": true}
+{"t": 1795404806.029, "kind": "action", "name": "input.scroll", "args": {"direction": "up", "notches": 2}, "ok": true}
+{"t": 1795404806.476, "kind": "gesture", "name": "NONE"}
+{"t": 1795404806.988, "kind": "gesture", "name": "SCROLL"}
+{"t": 1795404807.333, "kind": "action", "name": "input.scroll", "args": {"direction": "up", "notches": 1}, "ok": true}
+{"t": 1795404807.545, "kind": "gesture", "name": "READY"}
+{"t": 1795404808.365, "kind": "gesture", "name": "BRIGHTNESS"}
+{"t": 1795404808.557, "kind": "action", "name": "brightness.step", "args": {"delta": 1}, "ok": true}
+{"t": 1795404808.666, "kind": "action", "name": "brightness.step", "args": {"delta": 4}, "ok": true}
+{"t": 1795404808.799, "kind": "action", "name": "brightness.step", "args": {"delta": 7}, "ok": true}
+{"t": 1795404808.963, "kind": "action", "name": "brightness.step", "args": {"delta": 12}, "ok": true}
+{"t": 1795404809.062, "kind": "action", "name": "brightness.step", "args": {"delta": 7}, "ok": true}
+{"t": 1795404809.364, "kind": "gesture", "name": "NONE"}
+{"t": 1795404810.376, "kind": "gesture", "name": "BRIGHTNESS"}
+{"t": 1795404810.631, "kind": "gesture", "name": "READY"}
+{"t": 1795404814.413, "kind": "gesture", "name": "CLICK"}
+{"t": 1795404814.837, "kind": "gesture", "name": "READY"}
+{"t": 1795404814.863, "kind": "action", "name": "input.click", "args": {"button": "left", "count": 1}, "ok": true}
+{"t": 1795404815.403, "kind": "gesture", "name": "CLICK"}
+{"t": 1795404815.697, "kind": "gesture", "name": "READY"}
+{"t": 1795404815.697, "kind": "action", "name": "input.click", "args": {"button": "left", "count": 1}, "ok": true}
+{"t": 1795404816.188, "kind": "gesture", "name": "RIGHT CLICK"}
+{"t": 1795404816.188, "kind": "action", "name": "input.click", "args": {"button": "right", "count": 1}, "ok": true}
+{"t": 1795404816.589, "kind": "gesture", "name": "READY"}
+{"t": 1795404816.896, "kind": "gesture", "name": "VOLUME"}
+{"t": 1795404817.362, "kind": "gesture", "name": "RIGHT CLICK"}
+{"t": 1795404817.362, "kind": "action", "name": "input.click", "args": {"button": "right", "count": 1}, "ok": true}
+{"t": 1795404817.709, "kind": "gesture", "name": "VOLUME"}
+{"t": 1795404818.422, "kind": "gesture", "name": "SCROLL"}
+{"t": 1795404818.79, "kind": "gesture", "name": "VOLUME"}
+{"t": 1795404819.741, "kind": "action", "name": "volume.step", "args": {"delta": -1}, "ok": true}
+{"t": 1795404819.836, "kind": "action", "name": "volume.step", "args": {"delta": -1}, "ok": true}
+{"t": 1795404820.091, "kind": "action", "name": "volume.step", "args": {"delta": -3}, "ok": true}
+{"t": 1795404820.309, "kind": "gesture", "name": "SCROLL"}
+{"t": 1795404820.492, "kind": "gesture", "name": "VOLUME"}
+{"t": 1795404820.747, "kind": "action", "name": "volume.step", "args": {"delta": -1}, "ok": true}
+{"t": 1795404820.962, "kind": "gesture", "name": "MOVE"}
+{"t": 1795404821.196, "kind": "gesture", "name": "VOLUME"}
+{"t": 1795404821.659, "kind": "gesture", "name": "MOVE"}
+{"t": 1795404821.973, "kind": "gesture", "name": "VOLUME"}
+{"t": 1795404822.573, "kind": "gesture", "name": "SCROLL"}
+{"t": 1795404822.779, "kind": "gesture", "name": "VOLUME"}
+{"t": 1795404823.136, "kind": "gesture", "name": "NONE"}
+{"t": 1795404825.009, "kind": "gesture", "name": "MOVE"}
+{"t": 1795404825.619, "kind": "gesture", "name": "RIGHT CLICK"}
+{"t": 1795404825.62, "kind": "action", "name": "input.click", "args": {"button": "right", "count": 1}, "ok": true}
+{"t": 1795404826.382, "kind": "gesture", "name": "NONE"}
+{"t": 1795404827.793, "kind": "gesture", "name": "SCROLL"}
+{"t": 1795404828.499, "kind": "action", "name": "input.scroll", "args": {"direction": "down", "notches": 1}, "ok": true}
+{"t": 1795404829.368, "kind": "gesture", "name": "BRIGHTNESS"}
+{"t": 1795404829.622, "kind": "action", "name": "brightness.step", "args": {"delta": 2}, "ok": true}
+{"t": 1795404829.711, "kind": "action", "name": "brightness.step", "args": {"delta": 3}, "ok": true}
+{"t": 1795404830.077, "kind": "gesture", "name": "READY"}
+{"t": 1795404830.528, "kind": "gesture", "name": "BRIGHTNESS"}
+{"t": 1795404830.784, "kind": "action", "name": "brightness.step", "args": {"delta": -1}, "ok": true}
+{"t": 1795404830.978, "kind": "action", "name": "brightness.step", "args": {"delta": -8}, "ok": true}
+{"t": 1795404831.191, "kind": "gesture", "name": "READY"}
+{"t": 1795404831.483, "kind": "gesture", "name": "MOVE"}
+{"t": 1795404832.446, "kind": "gesture", "name": "CLICK"}
+{"t": 1795404832.987, "kind": "gesture", "name": "MOVE"}
+{"t": 1795404832.988, "kind": "action", "name": "input.click", "args": {"button": "left", "count": 1}, "ok": true}
+{"t": 1795404833.269, "kind": "gesture", "name": "CLICK"}
+{"t": 1795404833.718, "kind": "gesture", "name": "MOVE"}
+{"t": 1795404833.718, "kind": "action", "name": "input.click", "args": {"button": "left", "count": 1}, "ok": true}
+{"t": 1795404834.02, "kind": "gesture", "name": "CLICK"}
+{"t": 1795404834.447, "kind": "gesture", "name": "DRAG"}
+{"t": 1795404834.447, "kind": "action", "name": "input.mouse_down", "args": {"button": "left"}, "ok": true}
+{"t": 1795404835.087, "kind": "gesture", "name": "RIGHT CLICK"}
+{"t": 1795404835.087, "kind": "action", "name": "input.mouse_up", "args": {"button": "left"}, "ok": true}
+{"t": 1795404835.088, "kind": "action", "name": "input.click", "args": {"button": "right", "count": 1}, "ok": true}
+{"t": 1795404835.348, "kind": "gesture", "name": "VOLUME"}
+{"t": 1795404835.853, "kind": "action", "name": "volume.step", "args": {"delta": -1}, "ok": true}
+{"t": 1795404836.188, "kind": "action", "name": "volume.step", "args": {"delta": 1}, "ok": true}
+{"t": 1795404836.316, "kind": "action", "name": "volume.step", "args": {"delta": 2}, "ok": true}
+{"t": 1795404836.617, "kind": "action", "name": "volume.step", "args": {"delta": -1}, "ok": true}
+{"t": 1795404836.763, "kind": "action", "name": "volume.step", "args": {"delta": -1}, "ok": true}
+{"t": 1795404837.019, "kind": "action", "name": "volume.step", "args": {"delta": 1}, "ok": true}
+{"t": 1795404837.163, "kind": "action", "name": "volume.step", "args": {"delta": 3}, "ok": true}
+{"t": 1795404837.274, "kind": "action", "name": "volume.step", "args": {"delta": 2}, "ok": true}
+{"t": 1795404837.421, "kind": "action", "name": "volume.step", "args": {"delta": 1}, "ok": true}
+{"t": 1795404837.531, "kind": "action", "name": "volume.step", "args": {"delta": 1}, "ok": true}
+{"t": 1795404837.928, "kind": "gesture", "name": "SCROLL"}
+{"t": 1795404838.44, "kind": "gesture", "name": "BRIGHTNESS"}
+{"t": 1795404838.633, "kind": "gesture", "name": "READY"}
+{"t": 1795404839.095, "kind": "gesture", "name": "BRIGHTNESS"}
+{"t": 1795404839.657, "kind": "action", "name": "brightness.step", "args": {"delta": 5}, "ok": true}
+{"t": 1795404840.159, "kind": "gesture", "name": "NONE"}
