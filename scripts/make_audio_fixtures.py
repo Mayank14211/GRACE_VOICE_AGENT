@@ -6,6 +6,7 @@ Writes 16 kHz mono 16-bit WAVs with seeded low-level room noise:
     silence.wav       4 s of noise, no speech
     one_command.wav   "open notepad"
     two_commands.wav  "volume up" ... 1.5 s pause ... "take a screenshot"
+    hey_jarvis.wav    "hey jarvis" ... "open notepad" (wake-word test with the demo model)
 and copies Silero VAD (hash-checked, from models/) to tests/fixtures/audio/silero_vad.onnx so
 the tests run without models/. These are synthetic voices: the team's real recordings for
 accuracy and latency go in tests/audio/ (see tests/audio/README.md).
@@ -68,6 +69,12 @@ def main() -> int:
         "two_commands.wav",
         [gap(0.6), say("volume up"), gap(1.5), say("take a screenshot"), gap(1.2)],
         rng,
+    )
+    # Wake-word path test with the downloadable hey_jarvis model (fetch_models --demo-wakeword).
+    write(
+        "hey_jarvis.wav",
+        [gap(0.8), say("hey jarvis", rate=150), gap(0.6), say("open notepad"), gap(1.2)],
+        np.random.default_rng(7),
     )
     (vad,) = files_in("vad")
     src = MODELS_DIR / SILERO_VAD
