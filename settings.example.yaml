@@ -23,6 +23,18 @@ hotkeys:
   history: ctrl+alt+h           # show/hide the conversation history panel
   mark_wrong: ctrl+alt+x        # mark the last action as wrong (metrics)
 
+runtime:
+  # python -m grace: voice + gestures + hotkeys + overlay in one process.
+  mic_on_at_start: true       # Ctrl+Alt+M toggles it
+  gestures_on_at_start: false # Ctrl+Alt+G toggles it; the camera is only open while it is on
+  wake_word: listen           # word for the current (Google STT) voice loop; replaced in M5
+  overlay: true               # subtitle bar + status chip (false = console only)
+  subtitle_fade_s: 4.0        # the subtitle fades this long after the last line
+  history_turns: 10           # dialogue turns kept for the history panel (Ctrl+Alt+H)
+  earcons: true               # short tones when a hotkey toggles something
+  metrics: true               # JSONL events in logs/metrics/ (toggles, actions, CPU, marked wrong)
+  cpu_sample_s: 60.0          # how often CPU use is logged
+
 inference:
   # CPU threads for local models (STT, llama-server). 1-8.
   # 4 on the Intel i5-12450H (P-cores only), 6 on the AMD Ryzen 5 5500U.

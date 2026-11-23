@@ -76,6 +76,21 @@ class HotkeySettings(_Section):
         return self
 
 
+class RuntimeSettings(_Section):
+    """``python -m grace``: what is on at start, overlay and feedback options."""
+
+    mic_on_at_start: bool = True
+    gestures_on_at_start: bool = False  # the camera opens only while gestures are on
+    # Wake word for the legacy Google-STT voice loop (S06 replaces it with wakeword.model_path).
+    wake_word: str = Field("listen", min_length=2)
+    overlay: bool = True
+    subtitle_fade_s: float = Field(4.0, ge=0.5, le=60.0)
+    history_turns: int = Field(10, ge=1, le=50)
+    earcons: bool = True
+    metrics: bool = True  # JSONL rows in logs/metrics/ (git-ignored)
+    cpu_sample_s: float = Field(60.0, ge=5.0, le=3600.0)
+
+
 class InferenceSettings(_Section):
     # 4 on the i5-12450H (P-cores only), 6 on the Ryzen 5 5500U. Never logical-thread counts.
     threads: int = Field(4, ge=1, le=8)
@@ -232,6 +247,7 @@ class Settings(_Section):
     language: Literal["en", "hi", "auto"] = "en"
     demo_mode: bool = False  # pins the router to [local] and skips cloud calls
     hotkeys: HotkeySettings = Field(default_factory=HotkeySettings)
+    runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     inference: InferenceSettings = Field(default_factory=InferenceSettings)
     audio: AudioSettings = Field(default_factory=AudioSettings)
     wakeword: WakeWordSettings = Field(default_factory=WakeWordSettings)
