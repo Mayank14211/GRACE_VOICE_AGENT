@@ -1,25 +1,26 @@
-#!/usr/bin/env python3
-"""
-GRACE Voice Agent - legacy voice loop (replaced by `python -m grace` in S05).
+"""Legacy voice agent (old Google web STT + pyttsx3), run inside the S05 runtime.
 
-M2: every command goes through grace.intent.grammar (whole-phrase grammar) and the action
-registry (grace.actions). Risky actions (shutdown, restart, sleep) need the exact phrase AND a
-"yes" / Ctrl+Alt+Y confirmation within 8 seconds.
+Moved here from main.py in S05; ``grace.input.voice.VoiceWorker`` owns its lifecycle (wake-word
+passes, push-to-talk, mic on/off). S06 replaces the STT path (sounddevice + VAD + wake word +
+local STT) and this module goes away.
+
+Every command goes through grace.intent.grammar (whole-phrase grammar) and the action registry.
+In the runtime the registry is an ``ExecutorRegistry``, so voice actions run on the same executor
+thread as gestures. Risky actions (shutdown, restart, sleep) need the exact phrase AND a "yes" /
+Ctrl+Alt+Y confirmation within 8 seconds.
 """
 
-import argparse
+from __future__ import annotations
+
 import re
-import sys
-import threading
 import time
-from pathlib import Path
+from collections.abc import Callable
+from typing import Any
 
 from grace.actions import create_registry
 from grace.actions.confirmation import ConfirmationGate, Dispatcher
-from grace.config import ConfigError, format_provider_report, load_settings, report_providers
 from grace.intent.grammar import Grammar, default_grammar
 from grace.intent.types import Intent
-from grace.redaction import configure_logging, install_redaction
 
 # Punctuation is only dropped together with a trailing "execute": "type Hello!" keeps its "!".
 _EXECUTE_RE = re.compile(
@@ -52,6 +53,8 @@ HELP_TEXT = (
     "  'generate an image of ...', or several steps at once ('mute and open youtube')\n"
     "- After the wake word, keep talking: follow-up commands need no wake word until you pause.\n"
     "  'Stop listening' ends it; 'start over' makes Gemini forget the conversation.\n"
+    "- Hold Ctrl+Alt+Space to talk without the wake word. Ctrl+Alt+M mic, Ctrl+Alt+G gestures,\n"
+    "  Ctrl+Alt+Q stops everything.\n"
     "- Exit / quit / help"
 )
 
@@ -67,28 +70,49 @@ DEBUG_INSTRUCTION = (
 )
 
 
+def _noop(*_: Any) -> None:
+    pass
+
+
 class GraceVoiceAgent:
-    def __init__(self, gemini_api_key=None, openai_api_key=None, wake_word="jarvis", *,
-                 confirm_hotkey="ctrl+alt+y", registry=None, grammar: Grammar | None = None,
-                 tts=None, recognizer=None, screen_reader=None, assistant=None,
-                 follow_up_s=10.0, clock=time.monotonic):
-        """Initialize the voice agent.
-
-        Hardware-backed parts (tts, recognizer, screen_reader, registry) can be injected; tests
-        pass fakes. Anything not injected is created for real. `assistant` (GeminiAssistant)
+    def __init__(
+        self,
+        *,
+        confirm_hotkey: str = "ctrl+alt+y",
+        registry: Any = None,
+        grammar: Grammar | None = None,
+        tts: Any = None,
+        recognizer: Any = None,
+        screen_reader: Any = None,
+        assistant: Any = None,
+        wake_word: str = "listen",
+        follow_up_s: float = 10.0,
+        clock: Callable[[], float] = time.monotonic,
+        on_heard: Callable[[str], None] = _noop,
+        on_reply: Callable[[str], None] = _noop,
+        on_listening: Callable[[bool], None] = _noop,
+        on_mode: Callable[[str], None] = _noop,
+        on_exit: Callable[[], None] | None = None,
+        may_listen: Callable[[], bool] = lambda: True,
+    ) -> None:
+        """Hardware-backed parts (tts, recognizer, screen_reader, registry) can be injected; tests
+        pass fakes. Anything not injected is created for real. ``assistant`` (GeminiAssistant)
         answers whatever the grammar doesn't match; None disables that.
-        `gemini_api_key` is accepted for compatibility and no longer used here.
-        """
-        print("Initializing GRACE Voice Agent...")
 
+        ``may_listen`` is asked before and after every listen: False (mic turned off, panic stop)
+        ends the conversation and drops what was heard.
+        """
         if tts is None:
             from tts import TextToSpeech
+
             tts = TextToSpeech()
         if recognizer is None:
             from speech_recognition_module import SpeechRecognizer
-            recognizer = SpeechRecognizer(api="google", openai_api_key=openai_api_key)
+
+            recognizer = SpeechRecognizer(api="google")
         if screen_reader is None:
             from screen_reader import ScreenReader
+
             # OCR only: its old Gemini path (google-generativeai, 'gemini-pro') no longer works.
             screen_reader = ScreenReader(gemini_api_key=None)
         self.tts = tts
@@ -104,15 +128,20 @@ class GraceVoiceAgent:
         self.follow_up_s = follow_up_s
         self._clock = clock
         self._session_open = False
-        self._hotkey_handle = None
+        self._on_heard = on_heard
+        self._on_reply = on_reply
+        self._on_listening = on_listening
+        self._on_mode = on_mode
+        self._on_exit = on_exit
+        self.may_listen = may_listen
 
         self.wake_word = wake_word.lower()
         self.is_running = False
         self.mode = "command"  # "command" or "dictation"
-        self.command_history = []
+        self.command_history: list[str] = []
 
         # App-level intents (they don't touch the OS themselves); everything else -> dispatcher.
-        self._app_handlers = {
+        self._app_handlers: dict[str, Callable[[], None]] = {
             "app.help": self._handle_help_command,
             "app.exit": self._handle_exit_command,
             "app.dictation_start": self._handle_dictate_command,
@@ -126,117 +155,96 @@ class GraceVoiceAgent:
             "app.reset_conversation": self._reset_conversation,
         }
 
-    # -- feedback (console print until the overlay lands in S05) --------------------------------
-    def _say(self, message):
+    # -- feedback -------------------------------------------------------------------------------
+    def _say(self, message: str) -> None:
         print(f"GRACE: {message}")
+        self._on_reply(message)
         self.tts.speak_async(message)
 
-    # -- lifecycle ------------------------------------------------------------------------------
-    def start(self):
-        """Start the voice agent"""
-        self.is_running = True
+    def _set_mode(self, mode: str) -> None:
+        self.mode = mode
+        self._on_mode(mode)
 
-        print(f"Starting GRACE Voice Agent (Wake word: '{self.wake_word}')")
-        self._register_confirm_hotkey()
-        self.tts.speak_async(f"GRACE Voice Agent activated. Say {self.wake_word} to control your computer.")
-
-        try:
-            self._start_wake_word_detection()
-            while self.is_running:
-                time.sleep(0.1)
-        except KeyboardInterrupt:
-            print("\nGRACE Voice Agent interrupted by user")
-        finally:
-            self._cleanup()
-
-    def _register_confirm_hotkey(self):
-        try:
-            import keyboard
-            # Run the confirmed action off the keyboard hook thread.
-            self._hotkey_handle = keyboard.add_hotkey(
-                self.confirm_hotkey,
-                lambda: threading.Thread(target=self.gate.confirm, daemon=True).start(),
-            )
-        except Exception as e:  # keyboard missing / hook refused: voice "yes" still works
-            print(f"Confirm hotkey {self.confirm_hotkey} unavailable: {e}")
-
-    def _cleanup(self):
-        """Clean up resources"""
-        self.is_running = False
-        self.gate.cancel(announce=False)
-        if self._hotkey_handle is not None:
-            try:
-                import keyboard
-                keyboard.remove_hotkey(self._hotkey_handle)
-            except Exception:
-                pass
-        self.recognizer.stop_wake_word_detection()
-        print("GRACE Voice Agent stopped")
-
-    def _start_wake_word_detection(self):
-        self.recognizer.start_wake_word_detection(
-            wake_word=self.wake_word,
-            callback=self._on_wake_word_detected
-        )
-
-    def _on_wake_word_detected(self, rest=""):
-        """Wake word heard: run a conversation. `rest` is anything said in the same breath
+    # -- listening ------------------------------------------------------------------------------
+    def _on_wake_word_detected(self, rest: str = "") -> None:
+        """Wake word heard: run a conversation. ``rest`` is anything said in the same breath
         ("listen, open notepad")."""
         print(f"Wake word '{self.wake_word}' detected!")
         self._conversation(rest)
 
-    def _listen(self, phrase_time_limit):
+    def _listen(self, phrase_time_limit: int) -> str:
         """Listen once, after GRACE has finished speaking (so it doesn't hear itself)."""
         wait = getattr(self.tts, "wait_until_done", None)
         if wait is not None:
             wait()
             time.sleep(0.15)  # let the speaker's tail die away
-        return self.recognizer.listen_for_command(phrase_time_limit=phrase_time_limit) or ""
+        self._on_listening(True)
+        try:
+            return self.recognizer.listen_for_command(phrase_time_limit=phrase_time_limit) or ""
+        finally:
+            self._on_listening(False)
 
-    def _conversation(self, first=""):
-        """Handle commands until `follow_up_s` passes with nothing said, or "stop listening".
+    def _phrase_limit(self) -> int:
+        return 10 if self.mode == "dictation" else 6
+
+    def _conversation(self, first: str = "") -> None:
+        """Handle commands until ``follow_up_s`` passes with nothing said, or "stop listening".
 
         No wake word is needed between follow-ups ("open notepad", "type Hello", "close this
         window"). follow_up_s=0 restores one command per wake word. Dictation mode keeps the
-        conversation open until "stop dictation".
+        conversation open until "stop dictation". Mic off / panic (``may_listen``) ends it.
         """
         self._session_open = True
         pending = strip_execute_word(first)
         if not pending:
             self.tts.speak_async("Yes?")
         last_heard = self._clock()
-        while self.is_running and self._session_open:
+        while self.is_running and self._session_open and self.may_listen():
             if pending:
                 text, pending = pending, ""
             else:
-                text = self._listen(10 if self.mode == "dictation" else 6)
+                text = self._listen(self._phrase_limit())
+                if not self.may_listen():
+                    break  # mic went off while listening: drop what was heard
             if not strip_execute_word(text):
                 if self.mode != "dictation" and self._clock() - last_heard >= self.follow_up_s:
                     break
                 continue
             last_heard = self._clock()
-            print(f"Heard: '{text}'")
-            if self.mode == "dictation":
-                self._process_dictation(text)
-            else:
-                self._process_command(text)
+            self._handle_text(text)
             if self.follow_up_s <= 0 and self.mode != "dictation":
                 break
         self._session_open = False
         if self.is_running:
             print(f"Conversation ended. Say '{self.wake_word}' to start again.")
 
-    def _end_session(self):
+    def push_to_talk(self, heard: str | None = None) -> None:
+        """One command without the wake word (push-to-talk). ``heard`` = text already captured
+        while the key went down; otherwise listen once now."""
+        text = heard if heard else self._listen(self._phrase_limit())
+        if not self.may_listen() or not strip_execute_word(text):
+            return
+        self._handle_text(text)
+
+    def _handle_text(self, text: str) -> None:
+        print(f"Heard: '{text}'")
+        self._on_heard(text)
+        if self.mode == "dictation":
+            self._process_dictation(text)
+        else:
+            self._process_command(text)
+
+    def _end_session(self) -> None:
         self._session_open = False
         self._say("Okay. Say the wake word when you need me.")
 
-    def _reset_conversation(self):
+    def _reset_conversation(self) -> None:
         if self.assistant is not None:
             self.assistant.reset()
         self._say("Okay, starting a new conversation.")
 
     # -- command routing ------------------------------------------------------------------------
-    def _process_command(self, command):
+    def _process_command(self, command: str) -> Any:
         """Grammar -> Intent -> app handler or dispatcher (registry + confirmation gate)."""
         print(f"Processing command: '{command}'")
         self.command_history.append(command)
@@ -246,7 +254,7 @@ class GraceVoiceAgent:
             return self._ask_assistant(text)
         return self._handle_intent(intent)
 
-    def _ask_assistant(self, text):
+    def _ask_assistant(self, text: str) -> Any:
         """Unmatched speech -> Gemini (answers, web search, images, tool calls)."""
         if self.gate.pending is not None:
             self.gate.cancel()  # anything else abandons a pending risky action
@@ -261,7 +269,7 @@ class GraceVoiceAgent:
         self._say(reply.text)
         return reply
 
-    def _handle_intent(self, intent: Intent):
+    def _handle_intent(self, intent: Intent) -> Any:
         print(f"Intent: {intent.name} {intent.args}")
         handler = self._app_handlers.get(intent.name)
         if handler is not None:
@@ -271,7 +279,7 @@ class GraceVoiceAgent:
             return None
         return self.dispatcher.handle(intent)
 
-    def _process_dictation(self, text):
+    def _process_dictation(self, text: str) -> None:
         """Dictation mode: type everything until the whole phrase "stop dictation"."""
         intent = self.grammar.parse(text)
         if intent is not None and intent.name == "app.dictation_stop":
@@ -282,45 +290,47 @@ class GraceVoiceAgent:
             self._say(result.message)
 
     # -- app-level handlers ---------------------------------------------------------------------
-    def _handle_dictate_command(self):
-        self.mode = "dictation"
+    def _handle_dictate_command(self) -> None:
+        self._set_mode("dictation")
         self._say("Starting dictation mode. Say 'stop dictation' when you're done.")
 
-    def _handle_stop_dictation(self):
-        self.mode = "command"
+    def _handle_stop_dictation(self) -> None:
+        self._set_mode("command")
         self._say("Dictation mode stopped")
 
-    def _selected_text(self):
+    def _selected_text(self) -> str:
         result = self.registry.execute("clipboard.copy")
         return result.data.get("text", "") if result.ok else ""
 
-    def _read_screen(self):
+    def _read_screen(self) -> None:
         try:
             self._say("Reading screen content. This may take a moment...")
             text = self.screen_reader.read_screen_text()
             if text and text.strip():
-                limited_text = text[:1000] + ("..." if len(text) > 1000 else "")
-                self.tts.speak_async(limited_text)
+                self.tts.speak_async(text[:1000] + ("..." if len(text) > 1000 else ""))
             else:
-                self._say("I couldn't detect any text on the screen. Make sure Tesseract OCR is installed properly.")
-        except Exception as e:
+                self._say(
+                    "I couldn't detect any text on the screen. "
+                    "Make sure Tesseract OCR is installed properly."
+                )
+        except Exception as e:  # noqa: BLE001
             print(f"Error in read command: {e}")
             self._say("There was an error processing the read command.")
 
-    def _read_selection(self):
+    def _read_selection(self) -> None:
         text = self._selected_text()
         if text.strip():
             self.tts.speak_async(text[:1000] + ("..." if len(text) > 1000 else ""))
         else:
             self._say("No text is selected. Please select some text first.")
 
-    def _code_review(self, code, instruction):
+    def _code_review(self, code: str, instruction: str) -> str:
         """Selected code / screen text -> Gemini (user-initiated; the text leaves the machine)."""
         if self.assistant is None:
             return "Code analysis needs a GEMINI_API_KEY in the .env file."
         return self.assistant.complete(f"```\n{code[:20000]}\n```", instruction=instruction)
 
-    def _analyze(self, selection):
+    def _analyze(self, selection: bool) -> None:
         try:
             if selection:
                 code = self._selected_text()
@@ -337,11 +347,11 @@ class GraceVoiceAgent:
             analysis = self._code_review(code, ANALYZE_INSTRUCTION)
             print(f"Analysis result: {analysis[:100]}...")
             self.tts.speak_async(analysis)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             print(f"Error in analyze command: {e}")
             self._say("There was an error processing the analyze command.")
 
-    def _debug_code(self):
+    def _debug_code(self) -> None:
         try:
             code = self._selected_text()
             if not code.strip():
@@ -351,21 +361,24 @@ class GraceVoiceAgent:
             debug_result = self._code_review(code, DEBUG_INSTRUCTION)
             print(f"Debug analysis result: {debug_result[:100]}...")
             self.tts.speak_async(debug_result)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             print(f"Error in debug command: {e}")
             self._say("There was an error processing the debug command.")
 
-    def _handle_exit_command(self):
-        self.tts.speak_async("Shutting down GRACE Voice Agent. Goodbye!")
-        time.sleep(1.5)  # let the goodbye play before the loop exits
+    def _handle_exit_command(self) -> None:
+        self.tts.speak_async("Shutting down GRACE. Goodbye!")
+        time.sleep(1.5)  # let the goodbye play before the app exits
         self.is_running = False
+        self._session_open = False
+        if self._on_exit is not None:
+            self._on_exit()
 
-    def _handle_help_command(self):
+    def _handle_help_command(self) -> None:
         print(HELP_TEXT)
         self.tts.speak(HELP_TEXT)
 
 
-def build_assistant(settings, registry):
+def build_assistant(settings: Any, registry: Any) -> Any:
     """GeminiAssistant from settings, or None when Gemini has no key / is disabled."""
     if "gemini" not in settings.enabled_providers():
         return None
@@ -373,86 +386,17 @@ def build_assistant(settings, registry):
     from grace.intent.providers import GeminiClient
 
     g = settings.gemini
-    client = GeminiClient(settings.api_key("gemini"), timeout_s=g.timeout_s,
-                          max_retries=settings.router.max_retries)
+    client = GeminiClient(
+        settings.api_key("gemini"), timeout_s=g.timeout_s, max_retries=settings.router.max_retries
+    )
     return GeminiAssistant(
-        client, registry, model=g.model, image_model=g.image_model, web_search=g.web_search,
-        image_generation=g.image_generation, thinking_level=g.thinking_level,
-        image_timeout_s=g.image_timeout_s, memory_reset_s=g.memory_reset_s,
+        client,
+        registry,
+        model=g.model,
+        image_model=g.image_model,
+        web_search=g.web_search,
+        image_generation=g.image_generation,
+        thinking_level=g.thinking_level,
+        image_timeout_s=g.image_timeout_s,
+        memory_reset_s=g.memory_reset_s,
     )
-
-
-def main():
-    """Main function"""
-    parser = argparse.ArgumentParser(
-        description='GRACE Voice Agent. API keys are read from .env only (see .env.example).')
-    parser.add_argument('--settings', type=Path, default=None,
-                        help='settings file (default: settings.yaml in the repo root)')
-    parser.add_argument('--env-file', type=Path, default=None,
-                        help='.env file with API keys (default: .env in the repo root)')
-    parser.add_argument('--check-config', action='store_true',
-                        help='load settings and .env, report providers, then exit')
-    parser.add_argument('--wake-word', type=str, default="listen",
-                        help='Wake word to activate the agent')
-    parser.add_argument('--voice-index', type=int, default=None,
-                        help='Index of voice to use (run main.py --list-voices to see options)')
-    parser.add_argument('--speech-rate', type=int, default=170,
-                        help='Speech rate (words per minute)')
-    parser.add_argument('--list-voices', action='store_true',
-                        help='List available voices and exit')
-
-    args = parser.parse_args()
-
-    configure_logging()
-    try:
-        settings = load_settings(args.settings, args.env_file)
-    except ConfigError as exc:
-        print(f"Configuration error: {exc}", file=sys.stderr)
-        sys.exit(2)
-    install_redaction(settings.secret_values())
-    statuses = report_providers(settings)
-    print("LLM providers:\n" + format_provider_report(statuses))
-    if args.check_config:
-        return
-
-    if args.list_voices:
-        from tts import TextToSpeech
-        tts = TextToSpeech()
-        voices = tts.list_available_voices()
-        print(f"Found {len(voices)} voices:")
-        for voice in voices:
-            print(f"Voice {voice['index']}: {voice['name']} (Gender: {voice['gender'] or 'Unknown'})")
-            tts.change_voice(voice['index'])
-            tts.speak_async(f"This is the voice of {voice['name']}.")
-            time.sleep(2.5)
-        return
-
-    registry = create_registry()
-    assistant = build_assistant(settings, registry)
-    if assistant is None:
-        print("Gemini assistant: off (set GEMINI_API_KEY in .env for questions, search, images)")
-    else:
-        g = settings.gemini
-        print(f"Gemini assistant: {g.model}; web search {'on' if g.web_search else 'off'}, "
-              f"images {'on' if g.image_generation else 'off'} (both need a billing-enabled key)")
-
-    agent = GraceVoiceAgent(
-        openai_api_key=None,  # legacy Whisper API path; replaced by Groq / local STT in M5
-        wake_word=args.wake_word,
-        confirm_hotkey=settings.hotkeys.confirm,
-        registry=registry,
-        assistant=assistant,
-        follow_up_s=settings.wakeword.follow_up_s,
-    )
-    if assistant is not None:
-        assistant.notify = agent._say  # "Searching the web." while a slow tool runs
-
-    if args.voice_index is not None:
-        agent.tts.change_voice(args.voice_index)
-    if args.speech_rate != 170:
-        agent.tts.change_rate(args.speech_rate)
-
-    agent.start()
-
-if __name__ == "__main__":
-    main()
