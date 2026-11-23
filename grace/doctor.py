@@ -67,21 +67,31 @@ IMPORTS: tuple[tuple[str, str, bool], ...] = (
     ("grace.input.hotkeys", "grace (hotkeys)", False),
     ("grace.ui.overlay", "grace (overlay)", False),
     ("grace.runtime", "grace (runtime)", False),
+    ("onnxruntime", "onnxruntime", False),
+    ("openwakeword", "openwakeword", False),
+    ("moonshine_voice", "moonshine-voice", False),
+    ("grace.input.audio", "grace (audio + VAD)", False),
+    ("grace.input.stt", "grace (speech to text)", False),
+    ("grace.input.voice", "grace (voice pipeline)", False),
 )
 
-# Model files: (relative path under models/, expected sha256). Filled in from M5 onward.
-MODELS: tuple[tuple[str, str], ...] = ()
+
+# Model files: (relative path under models/, expected sha256), from grace/models.py.
+# scripts/fetch_models.py downloads them.
+def _required_models() -> tuple[tuple[str, str], ...]:
+    from grace.models import MODEL_FILES, REQUIRED_GROUPS
+
+    return tuple((f.path, f.sha256) for f in MODEL_FILES if f.group in REQUIRED_GROUPS)
+
+
+MODELS: tuple[tuple[str, str], ...] = _required_models()
 
 # Keys GRACE may read from .env (all optional: cloud providers are accelerators only).
 # Must match grace.config.ENV_KEYS (tests/test_doctor.py checks this).
 ENV_KEYS: tuple[str, ...] = ("GROQ_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY")
 
 # Features from docs/PLAN.md that do not exist yet in the codebase.
-NOT_BUILT: tuple[str, ...] = (
-    "wake word model (M5)",
-    "local STT: moonshine-voice (M5)",
-    "llama-server (M6)",
-)
+NOT_BUILT: tuple[str, ...] = ("llama-server (M6)",)
 
 
 @dataclass(frozen=True)
@@ -216,6 +226,7 @@ def check_models(
     results = []
     for rel, expected in models:
         path = models_dir / rel
+        rel = _short(rel)
         if not path.exists():
             results.append(Result(f"model {rel}", FAIL, "missing"))
         elif sha256(path) != expected.lower():
@@ -223,6 +234,15 @@ def check_models(
         else:
             results.append(Result(f"model {rel}", PASS, "hash ok"))
     return results
+
+
+def _short(rel: str) -> str:
+    """moonshine/download.moonshine.ai/model/small-streaming-en/quantized_26_11_02/x.ort ->
+    moonshine/small-streaming-en/x.ort (display only)."""
+    parts = rel.split("/")
+    if parts[0] == "moonshine" and len(parts) > 4:
+        return "/".join([parts[0], parts[3], parts[-1]])
+    return rel
 
 
 def read_env_key_names(env_path: Path) -> set[str]:
@@ -435,6 +455,168 @@ def check_not_built(features: Iterable[str] = NOT_BUILT) -> list[Result]:
     return [Result(feature, NOT_CONFIGURED) for feature in features]
 
 
+# ---------------------------------------------------------------- voice (M5)
+
+FETCH_HINT = "run: uv run python scripts/fetch_models.py"
+
+
+def _load_settings_quietly(settings_path: Path | None, env_path: Path | None):  # noqa: ANN202
+    from grace.config import ConfigError, load_settings
+
+    try:
+        return load_settings(settings_path, env_path)
+    except ConfigError:
+        return None
+
+
+def check_onnxruntime() -> Result:
+    """One onnxruntime, CPU build, the same 1.23 line as the copy moonshine-voice bundles."""
+    from importlib import metadata
+
+    dists = {d.metadata["Name"].lower() for d in metadata.distributions()}
+    gpu = sorted(d for d in dists if d.startswith("onnxruntime") and d != "onnxruntime")
+    if gpu:
+        return Result("onnxruntime (one CPU build)", FAIL, f"also installed: {', '.join(gpu)}")
+    import onnxruntime as ort
+
+    providers = ort.get_available_providers()
+    if "CPUExecutionProvider" not in providers:
+        return Result("onnxruntime (one CPU build)", FAIL, f"no CPU provider: {providers}")
+    detail = f"onnxruntime {ort.__version__} (CPU)"
+    status = PASS
+    bundled = _moonshine_ort_version()
+    if bundled:
+        detail += f"; moonshine-voice bundles {bundled}"
+        if ".".join(bundled.split(".")[:2]) != ".".join(ort.__version__.split(".")[:2]):
+            status = WARN
+    return Result("onnxruntime (one CPU build)", status, detail)
+
+
+def _moonshine_ort_version() -> str | None:
+    if not IS_WINDOWS:
+        return None
+    try:
+        import moonshine_voice
+        import win32api
+
+        dll = Path(moonshine_voice.__file__).parent / "onnxruntime.dll"
+        info = win32api.GetFileVersionInfo(str(dll), "\\")
+        ms = info["FileVersionMS"]  # major.minor (the build field is a date that overflows)
+        return f"{ms >> 16}.{ms & 0xFFFF}"
+    except Exception:  # noqa: BLE001 - informational only
+        return None
+
+
+def check_vad() -> Result:
+    from grace.models import MODELS_DIR, SILERO_VAD
+
+    path = MODELS_DIR / SILERO_VAD
+    if not path.is_file():
+        return Result("voice activity detection", FAIL, f"Silero VAD missing: {FETCH_HINT}")
+    import numpy as np
+
+    from grace.input.audio import FRAME, SileroVad
+
+    vad = SileroVad(path)
+    started = time.perf_counter()
+    probs = [vad.prob(np.zeros(FRAME, dtype=np.float32)) for _ in range(30)]
+    ms = (time.perf_counter() - started) * 1000 / len(probs)
+    if max(probs) > 0.5:
+        return Result("voice activity detection", FAIL, "Silero VAD calls silence speech")
+    return Result("voice activity detection", PASS, f"Silero VAD, {ms:.2f} ms per 32 ms frame")
+
+
+def check_wakeword(settings_path: Path | None = None, env_path: Path | None = None) -> Result:
+    from grace.input.wakeword import load_wake_word
+    from grace.models import MODELS_DIR, resolve
+
+    settings = _load_settings_quietly(settings_path, env_path)
+    if settings is None:
+        return Result("wake word", NOT_CONFIGURED, "settings.yaml invalid (see above)")
+    ww = settings.wakeword
+    if not ww.enabled:
+        return Result("wake word", NOT_CONFIGURED, "off: every utterance is a command")
+    path = resolve(ww.model_path)
+    if not path.is_file():
+        return Result(
+            "wake word",
+            NOT_CONFIGURED,
+            f"no model at {ww.model_path}: saying '{settings.runtime.wake_word}' works meanwhile "
+            "(docs/wakeword.md)",
+        )
+    det, why = load_wake_word(
+        True, path, models_dir=MODELS_DIR, threshold=ww.threshold, patience=ww.patience
+    )
+    if det is None:
+        return Result("wake word", FAIL, why)
+    from grace.models import sha256 as file_sha
+
+    return Result("wake word", PASS, f"{why}; sha256 {file_sha(path)[:12]}")
+
+
+def check_stt(settings_path: Path | None = None, env_path: Path | None = None) -> list[Result]:
+    """Moonshine (required, English): load + transcribe 1 s of silence. faster-whisper and Groq
+    are optional: not configured when their extra / key is missing."""
+    from grace.input.stt import whisper_installed
+
+    settings = _load_settings_quietly(settings_path, env_path)
+    if settings is None:
+        return [Result("speech to text", NOT_CONFIGURED, "settings.yaml invalid (see above)")]
+    results = [_check_moonshine(settings.stt.moonshine_model)]
+    if not whisper_installed():
+        results.append(
+            Result(
+                "stt faster-whisper",
+                NOT_CONFIGURED,
+                "extra not installed (uv sync --extra stt-whisper)",
+            )  # fmt: skip
+        )
+    else:
+        from grace.models import MODELS_DIR, WHISPER_DIR
+
+        size = settings.stt.whisper_model
+        cached = (MODELS_DIR / WHISPER_DIR / f"models--Systran--faster-whisper-{size}").is_dir()
+        results.append(
+            Result("stt faster-whisper", PASS, f"installed, model '{size}' downloaded")
+            if cached
+            else Result(
+                "stt faster-whisper", WARN, f"model '{size}' not downloaded: {FETCH_HINT} --whisper"
+            )
+        )
+    key = settings.api_key("groq")
+    results.append(
+        Result("stt groq", PASS, f"GROQ_API_KEY set; {settings.stt.groq_model} (not called)")
+        if key
+        else Result("stt groq", NOT_CONFIGURED, "GROQ_API_KEY not set in .env (optional)")
+    )
+    return results
+
+
+def _check_moonshine(arch: str) -> Result:
+    from grace.models import MOONSHINE_ARCHS, moonshine_dir
+
+    name = f"stt moonshine {arch}"
+    if not moonshine_dir(arch).is_dir():
+        return Result(name, FAIL, f"model missing: {FETCH_HINT}")
+    import numpy as np
+
+    from grace.input.audio import FRAME, frames
+    from grace.input.stt.base import SttError, transcribe
+    from grace.input.stt.moonshine import MoonshineStt
+
+    engine = MoonshineStt(moonshine_dir(arch), MOONSHINE_ARCHS[arch][1])
+    started = time.perf_counter()
+    try:
+        engine.load()
+        load_ms = (time.perf_counter() - started) * 1000
+        final, _ = transcribe(engine, frames(np.zeros(FRAME * 31, dtype=np.float32)))
+    except SttError as exc:
+        return Result(name, FAIL, str(exc))
+    return Result(
+        name, PASS, f"loaded in {load_ms:.0f} ms; 1 s of audio -> text in {final.latency_ms:.0f} ms"
+    )
+
+
 # ---------------------------------------------------------------- runner
 
 
@@ -451,6 +633,10 @@ def run_checks(hardware: bool = True) -> list[Result]:
         check_gestures,
         check_hotkeys,
         check_overlay,
+        check_onnxruntime,
+        check_vad,
+        check_wakeword,
+        check_stt,
     ]
     if hardware:
         checks += [
