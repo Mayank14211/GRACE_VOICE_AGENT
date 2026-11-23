@@ -58,6 +58,7 @@ package = false
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-ra --strict-markers"
+qt_api = "pyside6"
 timeout = 60
 markers = [
     "hardware: needs a real mic, camera, speakers or display (run manually on the base machine)",

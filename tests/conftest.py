@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
+
+# Qt tests run headless (pytest-qt, overlay smoke test): no window ever appears on screen.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
