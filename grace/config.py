@@ -83,7 +83,9 @@ class RuntimeSettings(_Section):
     gestures_on_at_start: bool = False  # the camera opens only while gestures are on
     mic_button: bool = True  # on-screen microphone button next to the status chip (needs overlay)
     gesture_button: bool = True  # on-screen camera / gesture on-off button, left of the mic button
-    # Wake word for the legacy Google-STT voice loop (S06 replaces it with wakeword.model_path).
+    # Spoken wake word used while there is no trained wake-word model (wakeword.model_path missing):
+    # every utterance is transcribed offline and must start with this word. Also stripped from
+    # push-to-talk commands ("listen, open notepad" -> "open notepad").
     wake_word: str = Field("listen", min_length=2)
     overlay: bool = True
     subtitle_fade_s: float = Field(4.0, ge=0.5, le=60.0)
@@ -99,20 +101,55 @@ class InferenceSettings(_Section):
 
 
 class AudioSettings(_Section):
+    """grace/input/audio.py: one 16 kHz mono mic stream, Silero VAD marks utterances."""
+
     sample_rate: Literal[16000] = 16000
     input_device: int | str | None = None  # None = system default microphone
     vad_threshold: float = Field(0.5, ge=0.0, le=1.0)
-    end_of_speech_ms: int = Field(500, ge=100, le=5000)
-    max_utterance_s: float = Field(15.0, gt=0.0, le=60.0)
+    end_of_speech_ms: int = Field(500, ge=100, le=5000)  # silence that ends an utterance
+    max_utterance_s: float = Field(12.0, gt=0.0, le=60.0)  # cap on one command
+    dictation_max_s: float = Field(30.0, gt=0.0, le=120.0)  # cap on one dictated sentence
+    pre_roll_ms: int = Field(300, ge=0, le=1000)  # audio kept from before speech started
+    min_speech_ms: int = Field(200, ge=0, le=2000)  # shorter blips (clicks, coughs) are dropped
 
 
 class WakeWordSettings(_Section):
+    """openWakeWord with the team's custom model (docs/wakeword.md).
+
+    enabled + model file present -> openWakeWord. enabled + no model file -> the spoken
+    runtime.wake_word, transcribed offline. enabled false -> while the mic is on, every utterance
+    is a command (no wake word). The mic hotkey and push-to-talk always work.
+    """
+
     enabled: bool = True
     model_path: Path = Path("models/wakeword/grace.onnx")
     threshold: float = Field(0.5, ge=0.0, le=1.0)
+    patience: int = Field(2, ge=1, le=20)  # consecutive 80 ms frames above threshold
     # After the wake word, keep listening for follow-up commands until this many seconds pass
     # without one. 0 = say the wake word before every command.
     follow_up_s: float = Field(10.0, ge=0.0, le=120.0)
+
+
+SttEngineName = Literal["moonshine", "whisper_local", "groq"]
+
+
+class SttSettings(_Section):
+    """grace/input/stt: which engine turns speech into text.
+
+    engine auto: language en -> moonshine; language hi / auto, or dictation with
+    dictation_accurate -> groq if GROQ_API_KEY is set and it answered recently, else whisper_local.
+    """
+
+    engine: Literal["auto", "moonshine", "whisper_local", "groq"] = "auto"
+    moonshine_model: Literal["tiny-streaming", "small-streaming", "medium-streaming"] = (
+        "small-streaming"
+    )
+    update_interval_s: float = Field(0.3, ge=0.1, le=2.0)  # how often partial text refreshes
+    whisper_model: Literal["tiny", "base", "small"] = "base"  # faster-whisper, int8, beam 1
+    dictation_accurate: bool = False  # dictation via groq / whisper_local instead of moonshine
+    groq_model: str = "whisper-large-v3-turbo"
+    groq_timeout_s: float = Field(8.0, gt=0.0, le=60.0)
+    partials: bool = True  # show partial text on the overlay while the user speaks
 
 
 class GeminiSettings(_Section):
@@ -253,6 +290,7 @@ class Settings(_Section):
     inference: InferenceSettings = Field(default_factory=InferenceSettings)
     audio: AudioSettings = Field(default_factory=AudioSettings)
     wakeword: WakeWordSettings = Field(default_factory=WakeWordSettings)
+    stt: SttSettings = Field(default_factory=SttSettings)
     gestures: GestureSettings = Field(default_factory=GestureSettings)
     router: RouterSettings = Field(default_factory=RouterSettings)
     gemini: GeminiSettings = Field(default_factory=GeminiSettings)

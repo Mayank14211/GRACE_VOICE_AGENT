@@ -29,7 +29,7 @@ runtime:
   gestures_on_at_start: false # Ctrl+Alt+G toggles it; the camera is only open while it is on
   mic_button: true            # clickable mic on/off button next to the status chip (never takes focus)
   gesture_button: true        # clickable camera on/off button left of the mic button
-  wake_word: listen           # word for the current (Google STT) voice loop; replaced in M5
+  wake_word: listen           # spoken wake word until a wake-word model exists (see wakeword:)
   overlay: true               # subtitle bar + status chip (false = console only)
   subtitle_fade_s: 4.0        # the subtitle fades this long after the last line
   history_turns: 10           # dialogue turns kept for the history panel (Ctrl+Alt+H)
@@ -44,18 +44,41 @@ inference:
   threads: 4
 
 audio:
+  # One microphone stream; Silero VAD (models/vad/silero_vad.onnx) finds where speech starts/ends.
+  # Download the models once: uv run python scripts/fetch_models.py
   sample_rate: 16000      # fixed: wake word, VAD and STT models expect 16 kHz mono
   input_device: null      # null = system default mic; or a sounddevice index / name substring
   vad_threshold: 0.5      # Silero VAD speech probability (0-1); raise it in noisy rooms
-  end_of_speech_ms: 500   # silence that ends an utterance (100-5000 ms)
-  max_utterance_s: 15.0   # hard cap on one utterance (seconds)
+  end_of_speech_ms: 500   # silence that ends an utterance (100-5000 ms); lower = faster replies
+  max_utterance_s: 12.0   # hard cap on one command (seconds)
+  dictation_max_s: 30.0   # hard cap on one dictated sentence (seconds)
+  pre_roll_ms: 300        # audio kept from just before speech started, so first words aren't cut
+  min_speech_ms: 200      # utterances with less speech than this (clicks, coughs) are ignored
 
 wakeword:
-  enabled: true                          # false = hotkeys / push-to-talk only
+  # enabled + model file present: openWakeWord with the team's model (see docs/wakeword.md).
+  # enabled + no model file yet:  say runtime.wake_word ("listen ...") instead; transcribed offline.
+  # enabled: false:               while the mic is on, everything you say is a command.
+  # Ctrl+Alt+M (mic) and Ctrl+Alt+Space (push-to-talk) always work, with or without a wake word.
+  enabled: true
   model_path: models/wakeword/grace.onnx # openWakeWord model, relative to the repo root
   threshold: 0.5                         # detection score (0-1); lower = more sensitive
+  patience: 2                            # 80 ms frames in a row above threshold (1-20)
   follow_up_s: 10.0                      # keep listening for follow-ups this long after a command
                                          # (0 = wake word before every command)
+
+stt:
+  # Speech to text. auto: English -> moonshine (offline, streaming).
+  # Hindi / auto language, or dictation with dictation_accurate -> groq when GROQ_API_KEY is set
+  # and online, else whisper_local (needs: uv sync --extra stt-whisper).
+  engine: auto                    # auto | moonshine | whisper_local | groq
+  moonshine_model: small-streaming  # tiny-streaming (fastest) | small-streaming | medium-streaming
+  update_interval_s: 0.3          # how often the partial text on the overlay refreshes
+  whisper_model: base             # faster-whisper model: tiny | base | small (int8, beam 1)
+  dictation_accurate: false       # true = dictate with groq / whisper_local instead of moonshine
+  groq_model: whisper-large-v3-turbo
+  groq_timeout_s: 8.0             # per request; on failure GRACE falls back to whisper_local
+  partials: true                  # show what you are saying on the overlay while you speak
 
 gestures:
   # Try them without the full app: uv run python -m grace.input.gestures --dry-run
