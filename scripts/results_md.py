@@ -59,8 +59,16 @@ def cpu_name() -> str:
     return platform.processor() or platform.machine()
 
 
+def os_name() -> str:
+    """platform.platform() calls Windows 11 "Windows-10"; the build number tells them apart."""
+    if sys.platform == "win32":
+        build = sys.getwindowsversion().build
+        return f"Windows {'11' if build >= 22000 else '10'} build {build}"
+    return platform.platform(terse=True)
+
+
 def stamp() -> str:
-    return f"{datetime.now():%Y-%m-%d %H:%M} on {cpu_name()} ({platform.platform(terse=True)})"
+    return f"{datetime.now():%Y-%m-%d %H:%M} on {cpu_name()} ({os_name()})"
 
 
 def table(headers: list[str], rows: list[list[str]]) -> str:
