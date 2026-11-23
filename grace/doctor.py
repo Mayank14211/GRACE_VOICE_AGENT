@@ -1,12 +1,12 @@
 """GRACE environment doctor.
 
 Usage:
-    uv run python scripts/doctor.py               # full check (opens mic + camera briefly)
-    uv run python scripts/doctor.py --no-hardware # skip mic/camera/volume/brightness
+    uv run python -m grace doctor               # full check (opens mic + camera briefly)
+    uv run python -m grace doctor --no-hardware # skip mic/camera/volume/brightness
+    (scripts/doctor.py still works and calls this module)
 
 Exit code 0 when nothing FAILs. WARN never fails the run. Features that are not built yet
 report "not configured". Secret values are never printed: only key names.
-Later this moves to `python -m grace doctor` (see docs/PLAN.md).
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:  # `python scripts/doctor.py` only puts scripts/ on sys.path
+if str(ROOT) not in sys.path:  # `python grace/doctor.py` only puts grace/ on sys.path
     sys.path.insert(0, str(ROOT))
 IS_WINDOWS = sys.platform == "win32"
 
@@ -64,6 +64,11 @@ IMPORTS: tuple[tuple[str, str, bool], ...] = (
     ("grace.intent.grammar", "grace (command grammar)", False),
     ("grace.input.gestures", "grace (gesture engine)", False),
     ("grace.actions.executor", "grace (action executor)", False),
+    ("PySide6.QtWidgets", "PySide6-Essentials", False),
+    ("grace.core.bus", "grace (event bus)", False),
+    ("grace.input.hotkeys", "grace (hotkeys)", False),
+    ("grace.ui.overlay", "grace (overlay)", False),
+    ("grace.runtime", "grace (runtime)", False),
 )
 
 # Model files: (relative path under models/, expected sha256). Filled in from M5 onward.
@@ -78,7 +83,6 @@ NOT_BUILT: tuple[str, ...] = (
     "wake word model (M5)",
     "local STT: moonshine-voice (M5)",
     "llama-server (M6)",
-    "overlay: PySide6 (M4)",
 )
 
 
@@ -336,6 +340,44 @@ def check_gestures(settings_path: Path | None = None, env_path: Path | None = No
     return Result("gesture map", PASS, detail)
 
 
+def check_overlay() -> Result:
+    """PySide6 imports and reports its Qt version (no window is opened)."""
+    try:
+        import PySide6
+        from PySide6 import QtCore, QtWidgets  # noqa: F401
+    except Exception as exc:  # noqa: BLE001
+        return Result("overlay (PySide6)", FAIL, f"PySide6 unavailable: {exc}")
+    return Result(
+        "overlay (PySide6)", PASS, f"PySide6 {PySide6.__version__}, Qt {QtCore.qVersion()}"
+    )
+
+
+def check_hotkeys(settings_path: Path | None = None, env_path: Path | None = None) -> Result:
+    """Every hotkey in settings.yaml resolves to keys (no hook is installed)."""
+    from grace.config import ConfigError, load_settings
+
+    try:
+        hotkeys = load_settings(settings_path, env_path).hotkeys
+    except ConfigError:
+        return Result("hotkeys", NOT_CONFIGURED, "settings.yaml invalid (see above)")
+    combos = {name: getattr(hotkeys, name) for name in type(hotkeys).model_fields}
+    if not IS_WINDOWS:
+        return Result("hotkeys", WARN, f"{len(combos)} configured; global hooks need Windows")
+    from grace.input.hotkeys import KeyboardLibBackend
+
+    backend = KeyboardLibBackend()
+    bad = []
+    for name, combo in combos.items():
+        try:
+            if not backend.scan_codes(combo):
+                bad.append(f"{name}={combo}")
+        except Exception:  # noqa: BLE001 - unknown key name
+            bad.append(f"{name}={combo}")
+    if bad:
+        return Result("hotkeys", FAIL, f"unknown keys: {', '.join(bad)}")
+    return Result("hotkeys", PASS, ", ".join(f"{c}" for c in combos.values()))
+
+
 def check_hand_tracker(frames: int = 15) -> Result:
     """Open the camera through MediaPipe Hands and time a few frames (no window)."""
     try:
@@ -409,6 +451,8 @@ def run_checks(hardware: bool = True) -> list[Result]:
         check_grammar,
         check_assistant,
         check_gestures,
+        check_hotkeys,
+        check_overlay,
     ]
     if hardware:
         checks += [

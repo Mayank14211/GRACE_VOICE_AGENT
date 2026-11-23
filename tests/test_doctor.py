@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import hashlib
-import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-import doctor  # noqa: E402
+from grace import doctor
 
 # Assembled at runtime so tests/test_no_secrets.py does not flag this file.
 SECRET = "sk" + "-THIS-MUST-NEVER-BE-PRINTED-1234567890"

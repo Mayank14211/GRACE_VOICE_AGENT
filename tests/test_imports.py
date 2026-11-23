@@ -32,7 +32,21 @@ def test_legacy_module_imports(module: str) -> None:
 @pytest.mark.windows
 def test_main_imports() -> None:
     main = fresh_import("main")
-    assert hasattr(main, "GraceVoiceAgent")
+    import grace.__main__
+
+    assert main.main is grace.__main__.main  # main.py is a thin shim (S05)
+    assert hasattr(fresh_import("grace.legacy_voice"), "GraceVoiceAgent")
+
+
+def test_runtime_modules_import_without_hardware() -> None:
+    # Bus, state, hotkeys, runtime and the voice worker must not pull in Qt, audio or pyautogui.
+    code = (
+        "import sys; import grace.core.bus, grace.core.state, grace.input.hotkeys, "
+        "grace.input.voice, grace.runtime, grace.metrics.log, grace.feedback.earcons; "
+        "bad = [m for m in ('PySide6', 'pyautogui', 'speech_recognition', 'sounddevice', "
+        "'keyboard') if m in sys.modules]; assert not bad, bad"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, cwd=ROOT)
 
 
 def test_gesture_engine_imports_without_camera_or_mediapipe() -> None:
@@ -63,9 +77,10 @@ def test_main_help_runs_without_image_generation() -> None:
 
 
 def test_doctor_imports() -> None:
+    assert callable(fresh_import("grace.doctor").main)
     sys.path.insert(0, str(ROOT / "scripts"))
     try:
-        doctor = fresh_import("doctor")
+        shim = fresh_import("doctor")  # scripts/doctor.py still works
     finally:
         sys.path.remove(str(ROOT / "scripts"))
-    assert callable(doctor.main)
+    assert shim.main.__module__ == "grace.doctor"
