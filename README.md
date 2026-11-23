@@ -54,7 +54,7 @@ do not edit it by hand.
 
 3. Check the environment (opens the mic and camera briefly; add `--no-hardware` to skip them):
 ```powershell
-uv run python scripts/doctor.py
+uv run python -m grace doctor        # scripts/doctor.py still works too
 ```
 
 4. Run the tests:
@@ -71,7 +71,7 @@ Adding a dependency: confirm a cp311 win_amd64 wheel exists, then
 ```powershell
 copy .env.example .env                    # API keys: GROQ_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY
 copy settings.example.yaml settings.yaml  # hotkeys, thresholds, provider order, inference.threads
-uv run python main.py --check-config      # shows which providers are enabled, then exits
+uv run python -m grace --check-config     # shows which providers are enabled, then exits
 ```
 See [Configuration](#configuration) below.
 
@@ -89,14 +89,34 @@ uv run python tesseract_check.py
 
 ## Usage
 
-Run the main application:
+Run GRACE (voice and hand gestures together in one process, controlled by global hotkeys):
 
 ```bash
-uv run python main.py
+uv run python -m grace               # same as: uv run python main.py
+uv run python -m grace --gestures    # start with gesture control on
+uv run python -m grace --dry-run     # fake OS backends: nothing on the PC changes
+uv run python -m grace --no-voice    # gestures + hotkeys only
 ```
 
-Try hand gestures on their own (temporary runner until the S05 runtime runs voice and gestures
-together; no camera window, the console prints the recognised gesture):
+| Hotkey | What it does |
+|---|---|
+| `Ctrl+Alt+M` | Microphone listening on / off |
+| `Ctrl+Alt+G` | Gesture control on / off (the camera is only open while it is on) |
+| `Ctrl+Alt+Space` (hold) | Push-to-talk: say one command without the wake word (works with the mic off) |
+| `Ctrl+Alt+Q` | Panic stop: mic and gestures off, mouse buttons released; GRACE keeps running |
+| `Ctrl+Alt+Y` | Confirm a pending risky action (shutdown, restart, sleep) |
+| `Ctrl+Alt+H` | Show / hide the conversation history panel |
+| `Ctrl+Alt+X` | Mark the last action as wrong (written to `logs/metrics/`) |
+
+Every hotkey can be changed in the `hotkeys:` section of `settings.yaml`; start-up toggles, the
+wake word and the overlay are in `runtime:`. A short tone confirms each toggle.
+
+There is no camera window. The only UI is a transparent overlay that never takes focus and lets
+clicks pass through: a subtitle bar at the bottom centre (what GRACE heard and answered; it fades
+after 4 s) and a status chip at the bottom right (mic, gestures and the current gesture, e.g.
+`Gesture: SCROLL`, plus the LLM provider). Ctrl+C in the console quits; so does saying "exit".
+
+Try hand gestures on their own (console prints the recognised gesture):
 
 ```bash
 uv run python -m grace.input.gestures --dry-run   # recognise only; the OS is not touched
@@ -121,13 +141,13 @@ You can customize the wake word (API keys are never passed on the command line; 
 [Configuration](#configuration)):
 
 ```bash
-uv run python main.py --wake-word "computer"
-uv run python main.py --settings my-settings.yaml --env-file my.env
+uv run python -m grace --wake-word "computer"
+uv run python -m grace --settings my-settings.yaml --env-file my.env
 ```
 
 List available voices:
 ```bash
-python main.py --list-voices
+uv run python -m grace --list-voices
 ```
 
 ### Available Commands
@@ -260,7 +280,7 @@ Example:
 
 ### Code Analysis Issues
 - **"Gemini AI not available"**: Check `GEMINI_API_KEY` is set in `.env`
-  (`uv run python main.py --check-config` shows whether the provider is enabled)
+  (`uv run python -m grace --check-config` shows whether the provider is enabled)
 - **No analysis**: Ensure you've selected code before issuing the command
 - **Network errors**: Check your internet connection
 
@@ -299,7 +319,12 @@ GRACE Voice Agent is built with a modular architecture consisting of:
    brightness via screen-brightness-control, mouse/keyboard, apps, power). Risky actions run only
    through the confirmation gate (`grace/actions/confirmation.py`)
 5. **Screen Reader Module**: Captures and analyzes screen content
-6. **Main Controller** (`main.py`): wake word -> grammar -> registry
+6. **Runtime** (`grace/__main__.py`, `grace/runtime.py`): Qt owns the main thread (overlay,
+   `grace/ui/overlay.py`); the voice worker (`grace/input/voice.py`, wrapping the legacy agent in
+   `grace/legacy_voice.py`), the gesture camera loop, the action executor and the keyboard hook
+   (`grace/input/hotkeys.py`) each run on their own thread and talk through the event bus
+   (`grace/core/bus.py`) and shared state (`grace/core/state.py`). Every OS action, from voice
+   or gesture, runs on the one executor thread, in order.
 
 ## Extending GRACE
 
