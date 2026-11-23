@@ -180,6 +180,8 @@ def register_input_actions(
     copy_wait_s: float = 0.3,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
+    held: set[str] = set()  # buttons GRACE pressed and has not released (panic stop releases them)
+
     @registry.register("input.click", ClickArgs, description="Click the mouse where it is.")
     def click(args: ClickArgs) -> ActionResult:
         keyboard_mouse.click(args.button, args.count)
@@ -203,12 +205,25 @@ def register_input_actions(
     @registry.register("input.mouse_down", ButtonArgs, description="Press and hold a mouse button.")
     def mouse_down(args: ButtonArgs) -> ActionResult:
         keyboard_mouse.mouse_down(args.button)
+        held.add(args.button)
         return ActionResult(True, f"Holding the {args.button} button.")
 
     @registry.register("input.mouse_up", ButtonArgs, description="Release a mouse button.")
     def mouse_up(args: ButtonArgs) -> ActionResult:
         keyboard_mouse.mouse_up(args.button)
+        held.discard(args.button)
         return ActionResult(True, f"Released the {args.button} button.")
+
+    @registry.register(
+        "input.release_all", NoArgs, description="Release every mouse button GRACE is holding."
+    )
+    def release_all(_: NoArgs) -> ActionResult:
+        released = sorted(held)
+        for button in released:
+            keyboard_mouse.mouse_up(button)
+            held.discard(button)  # only after a successful release, so a failure can retry
+        message = "Released the mouse." if released else "No mouse button was held."
+        return ActionResult(True, message, {"released": released})
 
     @registry.register("input.type", TextArgs, description="Type text at the cursor.")
     def type_text(args: TextArgs) -> ActionResult:
