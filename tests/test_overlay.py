@@ -13,6 +13,7 @@ from PySide6.QtCore import Qt  # noqa: E402
 from grace.core.bus import HEARD, REPLY, EventBus, qt_bridge  # noqa: E402
 from grace.core.state import AppState, StateSnapshot, Turn  # noqa: E402
 from grace.ui.overlay import (  # noqa: E402
+    BUTTON_GAP,
     Overlay,
     chip_html,
     history_html,
@@ -168,3 +169,142 @@ def test_a_bad_event_does_not_break_the_overlay(overlay) -> None:  # type: ignor
     bus.publish(REPLY, text="still fine")
     bus.pump()
     assert "still fine" in ov.subtitle.label.text()
+
+
+# --------------------------------------------------------------------------- mic button (A-001)
+@pytest.fixture
+def with_button(qtbot):  # type: ignore[no-untyped-def]
+    bus = EventBus()
+    state = AppState(bus)
+    bridge = qt_bridge(bus, ("state", HEARD, REPLY))
+    clicks: list[float] = []
+    ov = Overlay(bridge, state.snapshot(), on_mic_click=clicks.append, mic_hotkey="ctrl+alt+m")
+    ov.show()
+    yield ov, bus, state, clicks
+    ov.close()
+
+
+def test_no_button_without_a_click_handler(overlay) -> None:  # type: ignore[no-untyped-def]
+    ov, *_ = overlay
+    assert ov.mic_button is None
+
+
+@pytest.mark.windows
+def test_button_takes_clicks_but_never_focus(with_button) -> None:  # type: ignore[no-untyped-def]
+    ov, *_ = with_button
+    btn = ov.mic_button
+    flags = btn.windowFlags()
+    assert not flags & Qt.WindowType.WindowTransparentForInput  # it must receive clicks
+    assert not btn.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+    for flag in (
+        Qt.WindowType.FramelessWindowHint,
+        Qt.WindowType.WindowStaysOnTopHint,
+        Qt.WindowType.Tool,
+        Qt.WindowType.WindowDoesNotAcceptFocus,
+    ):
+        assert flags & flag, flag
+    assert btn.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+    assert btn.focusPolicy() == Qt.FocusPolicy.NoFocus
+    assert "ctrl+alt+m" in btn.toolTip()
+    # The rest of the overlay stays click-through.
+    for w in (ov.subtitle, ov.chip, ov.history):
+        assert w.windowFlags() & Qt.WindowType.WindowTransparentForInput
+
+
+@pytest.mark.windows
+def test_click_calls_the_handler_with_the_click_time(with_button, qtbot) -> None:  # type: ignore[no-untyped-def]
+    ov, _, _, clicks = with_button
+    qtbot.mouseClick(ov.mic_button, Qt.MouseButton.LeftButton)
+    assert len(clicks) == 1 and clicks[0] > 0
+    qtbot.mouseClick(ov.mic_button, Qt.MouseButton.RightButton)  # only the left button counts
+    assert len(clicks) == 1
+
+
+@pytest.mark.windows
+def test_press_then_release_outside_does_not_click(with_button, qtbot) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtCore import QPoint
+
+    ov, _, _, clicks = with_button
+    btn = ov.mic_button
+    qtbot.mousePress(btn, Qt.MouseButton.LeftButton)
+    qtbot.mouseRelease(btn, Qt.MouseButton.LeftButton, pos=QPoint(-20, -20))
+    assert clicks == []
+
+
+@pytest.mark.windows
+def test_a_crashing_click_handler_is_contained(qtbot) -> None:  # type: ignore[no-untyped-def]
+    bus = EventBus()
+    bridge = qt_bridge(bus, ("state",))
+
+    def boom(t: float) -> None:
+        raise RuntimeError("bad")
+
+    ov = Overlay(bridge, AppState(bus).snapshot(), on_mic_click=boom)
+    ov.show()
+    qtbot.mouseClick(ov.mic_button, Qt.MouseButton.LeftButton)  # logged, not raised
+    ov.close()
+
+
+@pytest.mark.windows
+def test_button_mirrors_mic_and_listening_state(with_button) -> None:  # type: ignore[no-untyped-def]
+    ov, bus, state, _ = with_button
+    btn = ov.mic_button
+    assert btn.on and not btn.listening and btn.ring() is None
+    state.update(mic_on=False)
+    bus.pump()
+    assert not btn.on and btn.ring() is None
+    state.update(mic_on=True, listening=True)
+    bus.pump()
+    assert btn.on and btn.ring() is not None
+    assert btn.grab().width() > 0  # it paints without error (both looks)
+    state.update(mic_on=False)
+    bus.pump()
+    assert btn.grab().width() > 0
+
+
+@pytest.mark.windows
+def test_button_sits_left_of_the_chip_and_follows_its_width(with_button) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtGui import QGuiApplication
+
+    ov, bus, state, _ = with_button
+    area = QGuiApplication.primaryScreen().availableGeometry()
+    btn, chip = ov.mic_button, ov.chip
+    assert btn.geometry().right() < chip.geometry().left()
+    assert btn.geometry().bottom() <= area.bottom()
+    gap = chip.x() - btn.width() - BUTTON_GAP
+    assert btn.x() == max(area.x(), gap)
+    state.update(gesture_on=True, gesture="BRIGHTNESS", mode="dictation", ptt_active=True)
+    bus.pump()  # the chip's text (and so its width and x) changes; the button keeps its place
+    assert btn.x() == max(area.x(), chip.x() - btn.width() - BUTTON_GAP)
+
+
+@pytest.mark.windows
+def test_click_to_screen_latency_is_reported(qtbot) -> None:  # type: ignore[no-untyped-def]
+    """Click -> Runtime.toggle_mic(t) -> state -> chip repaint: reported through on_toggle_shown."""
+    bus = EventBus()
+    state = AppState(bus)
+    shown: list[float] = []
+    bridge = qt_bridge(bus, ("state",))
+    ov = Overlay(
+        bridge,
+        state.snapshot(),
+        on_toggle_shown=lambda c, ms: shown.append(ms),
+        on_mic_click=lambda t: state.update(cause_t=t, mic_on=not state.mic_on),
+    )
+    ov.show()
+    qtbot.mouseClick(ov.mic_button, Qt.MouseButton.LeftButton)
+    bus.pump()
+    assert state.mic_on is False and len(shown) == 1 and 0 <= shown[0] < 200
+    assert not ov.mic_button.on
+    ov.close()
+
+
+@pytest.mark.windows
+def test_status_chip_is_a_single_line(overlay) -> None:  # type: ignore[no-untyped-def]
+    """Regression: a word-wrapping QLabel made the chip three lines tall and 139 px wide."""
+    ov, bus, state, _ = overlay
+    state.update(gesture_on=True, gesture="BRIGHTNESS", mode="dictation", ptt_active=True)
+    bus.pump()
+    line = ov.chip.label.fontMetrics().height()
+    assert ov.chip.height() < line * 2.5, ov.chip.height()
+    assert ov.chip.width() > ov.chip.height() * 5
