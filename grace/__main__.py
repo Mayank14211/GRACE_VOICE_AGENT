@@ -120,8 +120,8 @@ def _create_qt_app(enabled: bool) -> Any:
 
 def run(settings: Settings, args: argparse.Namespace) -> int:
     from grace.actions import create_fake_registry, create_registry
-    from grace.actions.executor import ActionExecutor, ExecutorRegistry
-    from grace.core.bus import HEARD, QUIT, REPLY, STATE, EventBus, qt_bridge
+    from grace.actions.executor import ActionExecutor
+    from grace.core.bus import HEARD, PARTIAL, QUIT, REPLY, STATE, EventBus, qt_bridge
     from grace.core.state import AppState
     from grace.feedback.earcons import create_earcons
     from grace.input.gestures import build_gesture_loop
@@ -167,38 +167,15 @@ def run(settings: Settings, args: argparse.Namespace) -> int:
         state.add_turn("grace", text)
         bus.publish(REPLY, text=text)
 
+    earcons = create_earcons(rt.earcons)
     agent = voice = tts = None
+    voice_lines: list[str] = []
     if not args.no_voice:
-        from grace.input.voice import VoiceWorker
-        from grace.legacy_voice import GraceVoiceAgent, build_assistant
-        from speech_recognition_module import SpeechRecognizer
-        from tts import TextToSpeech
-
-        tts = TextToSpeech()
-        if args.voice_index is not None:
-            tts.change_voice(args.voice_index)
-        if args.speech_rate != 170:
-            tts.change_rate(args.speech_rate)
-        recognizer = SpeechRecognizer(api="google")
-        assistant = build_assistant(settings, ExecutorRegistry(registry, executor, "router"))
-        agent = GraceVoiceAgent(
-            confirm_hotkey=settings.hotkeys.confirm,
-            registry=ExecutorRegistry(registry, executor, "grammar"),
-            tts=tts,
-            recognizer=recognizer,
-            assistant=assistant,
-            wake_word=args.wake_word or rt.wake_word,
-            follow_up_s=settings.wakeword.follow_up_s,
-            on_heard=heard,
-            on_reply=replied,
-            on_listening=lambda on: state.update(listening=on),
-            on_mode=lambda mode: state.update(mode=mode),
-            on_exit=lambda: runtime_ref[0].request_quit("voice"),
-        )
-        if assistant is not None:
-            assistant.notify = agent._say  # "Searching the web." while a slow tool runs
-        voice = VoiceWorker(agent, recognizer, mic_on=lambda: state.mic_on)
-    elif rt.mic_on_at_start:
+        agent, voice, tts, voice_lines = _build_voice(
+            settings, args, state, bus, metrics, earcons, registry, executor, runtime_ref, heard,
+            replied,
+        )  # fmt: skip
+    if voice is None and rt.mic_on_at_start:
         state.update(mic_on=False)
 
     runtime = Runtime(
@@ -208,7 +185,7 @@ def run(settings: Settings, args: argparse.Namespace) -> int:
         gestures=gestures,
         voice=voice,
         gate=agent.gate if agent is not None else None,
-        earcons=create_earcons(rt.earcons),
+        earcons=earcons,
         metrics=metrics,
         stop_speech=tts.stop if tts is not None else None,
     )
@@ -222,7 +199,7 @@ def run(settings: Settings, args: argparse.Namespace) -> int:
     if app is not None:
         from grace.ui.overlay import Overlay
 
-        bridge = qt_bridge(bus, (STATE, HEARD, REPLY, QUIT))
+        bridge = qt_bridge(bus, (STATE, HEARD, PARTIAL, REPLY, QUIT))
         overlay = Overlay(
             bridge,
             state.snapshot(),
@@ -231,7 +208,7 @@ def run(settings: Settings, args: argparse.Namespace) -> int:
             # No voice = nothing for the mic button to switch, so it is not shown.
             on_mic_click=(
                 (lambda t: runtime.toggle_mic(t, source="button"))
-                if rt.mic_button and not args.no_voice
+                if rt.mic_button and voice is not None
                 else None
             ),
             mic_hotkey=settings.hotkeys.mic_toggle,
@@ -253,15 +230,22 @@ def run(settings: Settings, args: argparse.Namespace) -> int:
         runtime.set_gestures(True)
 
     mode = "DRY RUN (nothing on the PC changes)" if args.dry_run else "LIVE"
-    wake = agent.wake_word if agent is not None else "-"
     hk = settings.hotkeys
+    for line in voice_lines:
+        print(f"Voice: {line}")
     print(
-        f"GRACE running ({mode}). Wake word: '{wake}'. Hotkeys: mic {hk.mic_toggle}, gestures "
+        f"GRACE running ({mode}). Hotkeys: mic {hk.mic_toggle}, gestures "
         f"{hk.gesture_toggle}, push-to-talk {hk.push_to_talk} (hold), panic {hk.panic_stop}, "
         f"confirm {hk.confirm}, history {hk.history}, mark wrong {hk.mark_wrong}. Ctrl+C quits."
     )
-    if agent is not None:
-        agent._say(f"GRACE is ready. Say {wake}, or hold Control Alt Space.")
+    if agent is not None and voice is not None:
+        wake = voice.pipeline.wake_mode
+        how = {
+            "model": "Say the wake word",
+            "text": f"Say {agent.wake_word}",
+            "off": "Just speak",
+        }[wake]
+        agent._say(f"GRACE is ready. {how}, or hold Control Alt Space.")
     started = time.monotonic()
     try:
         if app is not None and overlay is not None:
@@ -271,6 +255,96 @@ def run(settings: Settings, args: argparse.Namespace) -> int:
     finally:
         _shutdown(hotkeys, voice, gestures, executor, bus, runtime, metrics, overlay, started)
     return 0
+
+
+def _build_voice(
+    settings: Settings,
+    args: argparse.Namespace,
+    state: Any,
+    bus: Any,
+    metrics: Any,
+    earcons: Any,
+    registry: Any,
+    executor: Any,
+    runtime_ref: list[Any],
+    heard: Any,
+    replied: Any,
+) -> tuple[Any, Any, Any, list[str]]:
+    """(agent, voice worker or None, tts, description lines). Voice that can't start (models
+    missing) leaves GRACE running with gestures and hotkeys, and says why."""
+    from grace.actions.executor import ExecutorRegistry
+    from grace.core.bus import PARTIAL
+    from grace.input.voice import VoiceHooks, VoiceUnavailable, build_voice_worker
+    from grace.legacy_voice import GraceVoiceAgent, build_assistant
+    from tts import TextToSpeech
+
+    tts = TextToSpeech()
+    if args.voice_index is not None:
+        tts.change_voice(args.voice_index)
+    if args.speech_rate != 170:
+        tts.change_rate(args.speech_rate)
+    voice_ref: list[Any] = []
+    assistant = build_assistant(settings, ExecutorRegistry(registry, executor, "router"))
+    agent = GraceVoiceAgent(
+        confirm_hotkey=settings.hotkeys.confirm,
+        registry=ExecutorRegistry(registry, executor, "grammar"),
+        tts=tts,
+        assistant=assistant,
+        wake_word=args.wake_word or settings.runtime.wake_word,
+        on_heard=heard,
+        on_reply=replied,
+        on_mode=lambda mode: state.update(mode=mode),
+        on_end_session=lambda: voice_ref[0].pipeline.end_session() if voice_ref else None,
+        on_exit=lambda: runtime_ref[0].request_quit("voice"),
+    )
+    if assistant is not None:
+        assistant.notify = agent._say  # "Searching the web." while a slow tool runs
+
+    def on_wake(score: float | None) -> None:
+        earcons.play("wake")
+        metrics.write("wake", score=None if score is None else round(score, 3))
+
+    def on_stt(utt: Any, final: Any) -> None:
+        # No transcript text in metrics: dictation can be private. eval_stt measures accuracy.
+        eos_ms = (final.t_final - utt.eos_t) * 1000 if utt.eos_t else None
+        metrics.write(
+            "stt",
+            kind=utt.kind,
+            engine=final.engine,
+            fallback_from=final.fallback_from,
+            audio_s=round(final.audio_s, 2),
+            eos_to_final_ms=None if eos_ms is None else round(eos_ms, 1),
+            speech_end_to_final_ms=None if eos_ms is None else round(
+                eos_ms + utt.hangover_s * 1000, 1
+            ),
+            end=utt.end_reason,
+            partials=final.partials,
+            chars=len(final.text),
+        )  # fmt: skip
+        if eos_ms is not None:
+            log.info("stt %s: %.0f ms after end of speech (%s)", final.engine, eos_ms, utt.kind)
+
+    hooks = VoiceHooks(
+        command=agent.handle_utterance,
+        partial=lambda text: bus.publish(PARTIAL, text=text),
+        listening=lambda on: state.update(listening=on),
+        wake=on_wake,
+        stt_result=on_stt,
+        problem=replied,
+        is_dictation=lambda: agent.mode == "dictation",
+        is_muted=tts.is_speaking,
+        dictation_cancelled=agent.cancel_dictation,
+    )
+    try:
+        voice, lines = build_voice_worker(
+            settings, hooks, mic_on=lambda: state.mic_on, wake_word=agent.wake_word
+        )
+    except VoiceUnavailable as exc:
+        print(f"Voice input unavailable: {exc}")
+        replied(f"Voice input unavailable: {exc}")
+        return agent, None, tts, []
+    voice_ref.append(voice)
+    return agent, voice, tts, lines
 
 
 def _start_hotkeys(settings: Settings, runtime: Any) -> Any:

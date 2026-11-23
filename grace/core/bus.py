@@ -30,6 +30,7 @@ log = logging.getLogger(__name__)
 # Topics. data keys in brackets.
 STATE = "state"  # AppState changed [snapshot: StateSnapshot, changed: frozenset[str], cause_t]
 HEARD = "heard"  # what GRACE heard [text]
+PARTIAL = "partial"  # what GRACE is hearing, still changing [text]
 REPLY = "reply"  # what GRACE answered [text]
 ACTION = "action"  # an action finished [intent: Intent, result: ActionResult]
 QUIT = "quit"  # the app should exit [reason]

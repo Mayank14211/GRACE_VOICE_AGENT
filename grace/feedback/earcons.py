@@ -20,6 +20,7 @@ log = logging.getLogger(__name__)
 TONES: dict[str, tuple[tuple[int, int], ...]] = {
     "on": ((660, 50), (990, 70)),  # rising: something turned on
     "off": ((990, 50), (660, 70)),  # falling: something turned off
+    "wake": ((740, 40), (988, 60)),  # wake word heard: say the command
     "ptt_start": ((880, 40),),
     "ptt_end": ((620, 40),),
     "panic": ((400, 90), (260, 160)),

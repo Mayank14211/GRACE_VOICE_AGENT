@@ -8,8 +8,8 @@ Small top-level windows, each frameless, translucent, always on top, without a t
 (Qt.Tool) and never activated or focused. Three are also transparent for mouse and keyboard input
 (WindowTransparentForInput sets WS_EX_TRANSPARENT on Windows, so clicks reach the app below):
 
-- subtitle bar, bottom-centre: what GRACE heard and replied; fades out ``fade_after_s`` after
-  the last line;
+- subtitle bar, bottom-centre: what GRACE is hearing (partial text, in italics, while you
+  speak), what it heard and what it replied; fades out ``fade_after_s`` after the last line;
 - status chip, bottom-right: mic, gestures and the current gesture name, push-to-talk /
   listening / dictation flags, the LLM provider;
 - history panel (Ctrl+Alt+H), above the chip: the last dialogue turns.
@@ -46,7 +46,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QGuiApplication, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
-from grace.core.bus import HEARD, REPLY, STATE, Event
+from grace.core.bus import HEARD, PARTIAL, REPLY, STATE, Event
 from grace.core.state import StateSnapshot, Turn
 
 log = logging.getLogger(__name__)
@@ -70,9 +70,13 @@ def _clip(text: str, limit: int = SUBTITLE_MAX_CHARS) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
-def subtitle_html(heard: str | None, reply: str | None) -> str:
+def subtitle_html(heard: str | None, reply: str | None, partial: bool = False) -> str:
+    """``partial``: ``heard`` is still changing (shown in italics with an ellipsis)."""
     lines = []
-    if heard:
+    if heard and partial:
+        text = html.escape(_clip(heard, SUBTITLE_MAX_CHARS - 1)) + "…"
+        lines.append(f"<span style='color:{DIM}'><i>You: {text}</i></span>")
+    elif heard:
         lines.append(f"<span style='color:{DIM}'>You: {html.escape(_clip(heard))}</span>")
     if reply:
         lines.append(f"<b>GRACE:</b> {html.escape(_clip(reply))}")
@@ -166,6 +170,7 @@ class SubtitleBar(OverlayWindow):
         self.fade_after_s = fade_after_s
         self.heard: str | None = None
         self.reply: str | None = None
+        self.partial = False  # ``heard`` is a partial transcript
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._fade_out)
@@ -182,8 +187,13 @@ class SubtitleBar(OverlayWindow):
         y = area.y() + area.height() - self.height() - MARGIN
         self.move(x, y)
 
+    def show_partial(self, text: str) -> None:
+        """Live transcript while the user speaks; the final text (show_heard) replaces it."""
+        self.heard, self.reply, self.partial = text, None, True
+        self._refresh()
+
     def show_heard(self, text: str) -> None:
-        self.heard, self.reply = text, None  # a new utterance starts a new subtitle
+        self.heard, self.reply, self.partial = text, None, False  # a new subtitle
         self._refresh()
 
     def show_reply(self, text: str) -> None:
@@ -193,7 +203,7 @@ class SubtitleBar(OverlayWindow):
     def _refresh(self) -> None:
         self._anim.stop()
         self.setWindowOpacity(1.0)
-        self.set_html(subtitle_html(self.heard, self.reply))
+        self.set_html(subtitle_html(self.heard, self.reply, self.partial))
         self.show()
         self.raise_()
         self._timer.start(int(self.fade_after_s * 1000))
@@ -207,6 +217,7 @@ class SubtitleBar(OverlayWindow):
         if self.windowOpacity() <= 0.01:
             self.hide()
             self.heard = self.reply = None
+            self.partial = False
 
     @property
     def fading(self) -> bool:
@@ -470,6 +481,8 @@ class Overlay(QObject):
         try:
             if event.topic == STATE:
                 self._on_state(event)
+            elif event.topic == PARTIAL:
+                self.subtitle.show_partial(event.data.get("text", ""))
             elif event.topic == HEARD:
                 self.subtitle.show_heard(event.data.get("text", ""))
             elif event.topic == REPLY:

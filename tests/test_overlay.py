@@ -10,7 +10,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtCore import Qt  # noqa: E402
 
-from grace.core.bus import HEARD, REPLY, EventBus, qt_bridge  # noqa: E402
+from grace.core.bus import HEARD, PARTIAL, REPLY, EventBus, qt_bridge  # noqa: E402
 from grace.core.state import AppState, StateSnapshot, Turn  # noqa: E402
 from grace.ui.overlay import (  # noqa: E402
     BUTTON_GAP,
@@ -31,6 +31,12 @@ def test_subtitle_escapes_and_clips() -> None:
 
 def test_subtitle_reply_only() -> None:
     assert subtitle_html(None, "Stopped.") == "<b>GRACE:</b> Stopped."
+
+
+def test_subtitle_partial_is_italic_with_an_ellipsis() -> None:
+    out = subtitle_html("open note", None, partial=True)
+    assert "<i>You: open note…</i>" in out
+    assert "<i>" not in subtitle_html("open notepad", None)
 
 
 def test_chip_shows_mic_gesture_flags_and_provider() -> None:
@@ -54,7 +60,7 @@ def test_history_html() -> None:
 def overlay(qtbot):  # type: ignore[no-untyped-def]
     bus = EventBus()
     state = AppState(bus, provider="offline")
-    bridge = qt_bridge(bus, ("state", HEARD, REPLY))
+    bridge = qt_bridge(bus, ("state", HEARD, PARTIAL, REPLY))
     shown: list[tuple[frozenset[str], float]] = []
     ov = Overlay(
         bridge,
@@ -97,6 +103,18 @@ def test_subtitle_shows_heard_and_reply_then_fades(overlay, qtbot) -> None:  # t
     text = ov.subtitle.label.text()
     assert "You: open notepad" in text and "Opening notepad." in text
     qtbot.waitUntil(lambda: not ov.subtitle.isVisible(), timeout=3000)
+
+
+@pytest.mark.windows
+def test_partial_text_is_replaced_by_the_final(overlay) -> None:  # type: ignore[no-untyped-def]
+    ov, bus, *_ = overlay
+    bus.publish(PARTIAL, text="open note")
+    bus.pump()
+    assert ov.subtitle.isVisible() and "<i>You: open note…</i>" in ov.subtitle.label.text()
+    bus.publish(HEARD, text="open notepad")
+    bus.pump()
+    text = ov.subtitle.label.text()
+    assert "You: open notepad" in text and "<i>" not in text
 
 
 @pytest.mark.windows
@@ -176,7 +194,7 @@ def test_a_bad_event_does_not_break_the_overlay(overlay) -> None:  # type: ignor
 def with_button(qtbot):  # type: ignore[no-untyped-def]
     bus = EventBus()
     state = AppState(bus)
-    bridge = qt_bridge(bus, ("state", HEARD, REPLY))
+    bridge = qt_bridge(bus, ("state", HEARD, PARTIAL, REPLY))
     clicks: list[float] = []
     ov = Overlay(bridge, state.snapshot(), on_mic_click=clicks.append, mic_hotkey="ctrl+alt+m")
     ov.show()
@@ -315,7 +333,7 @@ def test_status_chip_is_a_single_line(overlay) -> None:  # type: ignore[no-untyp
 def with_buttons(qtbot):  # type: ignore[no-untyped-def]
     bus = EventBus()
     state = AppState(bus)
-    bridge = qt_bridge(bus, ("state", HEARD, REPLY))
+    bridge = qt_bridge(bus, ("state", HEARD, PARTIAL, REPLY))
     mic: list[float] = []
     cam: list[float] = []
     ov = Overlay(

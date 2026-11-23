@@ -1,4 +1,7 @@
-"""The legacy voice agent (was main.py) runs on grammar + registry (no substring matching)."""
+"""The voice agent (was main.py): grammar + registry (no substring matching), dictation, replies.
+
+Listening (wake word, follow-ups, push-to-talk) is tested in tests/test_voice_worker.py.
+"""
 
 from __future__ import annotations
 
@@ -36,7 +39,7 @@ class FakeScreenReader:
 def agent():
     registry, backends = create_fake_registry()
     a = legacy_voice.GraceVoiceAgent(
-        registry=registry, tts=FakeTTS(), recognizer=object(), screen_reader=FakeScreenReader()
+        registry=registry, tts=FakeTTS(), screen_reader=FakeScreenReader()
     )
     yield a, backends
     a.gate.cancel(announce=False)
@@ -155,109 +158,55 @@ def test_start_over_resets_the_assistant(agent) -> None:
     assert a.assistant.resets == 1
 
 
-# --------------------------------------------------------------------------- follow-ups
-class Clock:
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def __call__(self) -> float:
-        return self.now
-
-
-class ScriptedRecognizer:
-    """Each listen takes 3 s of fake time and returns the next utterance ("" = silence)."""
-
-    def __init__(self, clock: Clock, utterances: list[str]) -> None:
-        self.clock, self.queue, self.listens = clock, list(utterances), 0
-
-    def listen_for_command(self, phrase_time_limit: int = 5) -> str:
-        self.listens += 1
-        assert self.listens < 100, "conversation loop did not end"
-        self.clock.now += 3
-        return self.queue.pop(0) if self.queue else ""
+# --------------------------------------------------------------------------- from the pipeline
+def test_handle_utterance_runs_a_command(agent) -> None:
+    a, b = agent
+    heard: list[str] = []
+    a._on_heard = heard.append
+    a.handle_utterance("Volume 40.")
+    a.handle_utterance("   ")  # nothing said: nothing happens
+    a.handle_utterance("execute")
+    assert b.volume.level == 40 and heard == ["Volume 40."]
 
 
-def conversation_agent(utterances: list[str], follow_up_s: float = 10.0):
-    clock = Clock()
-    rec = ScriptedRecognizer(clock, utterances)
-    registry, b = create_fake_registry()
-    a = legacy_voice.GraceVoiceAgent(
-        registry=registry,
-        tts=FakeTTS(),
-        recognizer=rec,
-        screen_reader=FakeScreenReader(),
-        follow_up_s=follow_up_s,
-        clock=clock,
-    )
-    a.is_running = True
-    return a, b, rec
+def test_handle_utterance_after_exit_does_nothing(agent) -> None:
+    a, b = agent
+    a.is_running = False
+    a.handle_utterance("volume 40")
+    assert b.volume.calls == []
 
 
-def test_follow_up_commands_need_no_wake_word() -> None:
-    """The reported bug: open notepad, type, close the window, with one wake word."""
-    a, b, rec = conversation_agent(["type Hello, World!", "close this window"])
-    a._on_wake_word_detected("open notepad")  # said in the same breath as the wake word
-    assert b.launcher.launched == ["notepad"]
-    assert b.input.calls == [("write", "Hello, World!"), ("hotkey", "alt", "f4")]
-    assert not a._session_open
-    assert rec.listens == 2 + 4  # 2 follow-ups, then silence until 10 s idle (4 x 3 s)
+def test_dictation_separates_sentences(agent) -> None:
+    a, b = agent
+    a.handle_utterance("start dictation")
+    a.handle_utterance("Dear team,")
+    a.handle_utterance("the report is attached.")
+    a.handle_utterance("stop dictation")
+    a.handle_utterance("start dictation")
+    a.handle_utterance("New note.")
+    assert b.input.calls == [
+        ("write", "Dear team,"),
+        ("write", " the report is attached."),
+        ("write", "New note."),
+    ]
 
 
-def test_wake_word_alone_asks_and_listens() -> None:
-    a, b, _ = conversation_agent(["volume 40"])
-    a._on_wake_word_detected("")
-    assert a.tts.spoken[0] == "Yes?" and b.volume.level == 40
+def test_mic_off_cancels_dictation_quietly(agent) -> None:
+    a, _ = agent
+    modes: list[str] = []
+    a._on_mode = modes.append
+    a.handle_utterance("start dictation")
+    spoken = len(a.tts.spoken)
+    a.cancel_dictation()
+    assert a.mode == "command" and modes == ["dictation", "command"]
+    assert len(a.tts.spoken) == spoken  # no speech: the user just turned the mic off
+    a.cancel_dictation()  # not dictating: nothing
+    assert modes == ["dictation", "command"]
 
 
-def test_a_pause_shorter_than_the_window_keeps_the_conversation() -> None:
-    a, b, _ = conversation_agent(["volume 40", "", "", "volume 20"])  # 6 s of silence
-    a._on_wake_word_detected("")
-    assert b.volume.calls == [("set_level", 40), ("set_level", 20)]
-
-
-def test_a_long_pause_ends_the_conversation() -> None:
-    a, b, rec = conversation_agent(["volume 40", "", "", "", "", "volume 20"])  # 12 s silence
-    a._on_wake_word_detected("")
-    assert b.volume.calls == [("set_level", 40)] and rec.queue == ["volume 20"]
-
-
-def test_stop_listening_ends_the_conversation() -> None:
-    a, b, rec = conversation_agent(["volume 40", "stop listening", "volume 10"])
-    a._on_wake_word_detected("")
-    assert b.volume.level == 40 and rec.queue == ["volume 10"]
-    assert "Say the wake word" in a.tts.spoken[-1]
-
-
-def test_follow_up_zero_means_one_command_per_wake_word() -> None:
-    a, b, rec = conversation_agent(["type hi"], follow_up_s=0)
-    a._on_wake_word_detected("open notepad")
-    assert b.launcher.launched == ["notepad"] and b.input.calls == [] and rec.queue == ["type hi"]
-
-
-def test_dictation_survives_pauses_until_stopped() -> None:
-    a, b, _ = conversation_agent(
-        ["start dictation", "", "", "", "", "", "Dear team,", "stop dictation"]
-    )
-    a._on_wake_word_detected("")
-    assert b.input.calls == [("write", "Dear team,")] and a.mode == "command"
-
-
-def test_waits_for_tts_before_listening(monkeypatch) -> None:
-    a, _, rec = conversation_agent(["volume 40"])
-    order: list[str] = []
-    a.tts.wait_until_done = lambda: order.append("wait")
-    original = rec.listen_for_command
-    rec.listen_for_command = lambda phrase_time_limit=5: (order.append("listen"), original())[1]
-    monkeypatch.setattr(legacy_voice.time, "sleep", lambda s: None)
-    a._on_wake_word_detected("")
-    assert order[:2] == ["wait", "listen"]
-
-
-def test_split_wake_word() -> None:
-    from speech_recognition_module import split_wake_word
-
-    assert split_wake_word("Listen, open notepad", "listen") == "open notepad"
-    assert split_wake_word("listen", "listen") == ""
-    assert split_wake_word("I was listening to music", "listen") is None
-    assert split_wake_word("hey LISTEN type Hi", "listen") == "type Hi"
-    assert split_wake_word(None, "listen") is None
+def test_stop_listening_tells_the_pipeline(agent) -> None:
+    a, _ = agent
+    ended: list[bool] = []
+    a._on_end_session = lambda: ended.append(True)
+    a.handle_utterance("stop listening")
+    assert ended == [True] and "Say the wake word" in a.tts.spoken[-1]

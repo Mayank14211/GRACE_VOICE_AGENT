@@ -130,6 +130,10 @@ class TextToSpeech:
         if 0.0 <= volume <= 1.0:
             self.engine.setProperty('volume', volume)
             
+    def is_speaking(self):
+        """True while speech is playing (the voice pipeline ignores the mic meanwhile)."""
+        return bool(self.speaking_thread and self.speaking_thread.is_alive())
+
     def wait_until_done(self):
         """Wait until speech is complete"""
         if self.speaking_thread and self.speaking_thread.is_alive():
