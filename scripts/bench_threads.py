@@ -27,7 +27,14 @@ for p in (ROOT, ROOT / "scripts"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from results_md import STT_RESULTS, median, stamp, table, write_section  # noqa: E402
+from results_md import (  # noqa: E402
+    STT_RESULTS,
+    median,
+    stamp,
+    table,
+    use_utf8_output,
+    write_section,
+)
 
 MAX_THREADS = 8
 
@@ -105,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--save", action="store_true")
     parser.add_argument("--llm", action="store_true", help="also llama-server (from M6)")
     args = parser.parse_args(argv)
+    use_utf8_output()
 
     counts = sorted({int(t) for t in args.threads.split(",")})
     if any(not 1 <= t <= MAX_THREADS for t in counts):

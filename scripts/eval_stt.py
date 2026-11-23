@@ -39,6 +39,7 @@ from results_md import (  # noqa: E402
     percentile,
     stamp,
     table,
+    use_utf8_output,
     write_section,
 )
 
@@ -328,6 +329,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--label", default=None, help="name of the audio set in the results")
     parser.add_argument("--section", default="eval_stt", help="results section name")
     args = parser.parse_args(argv)
+    use_utf8_output()
 
     from grace.config import load_settings
     from grace.input.stt.base import SttError

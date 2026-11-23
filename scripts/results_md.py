@@ -67,3 +67,10 @@ def table(headers: list[str], rows: list[list[str]]) -> str:
     lines = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
     lines += ["| " + " | ".join(row) + " |" for row in rows]
     return "\n".join(lines)
+
+
+def use_utf8_output() -> None:
+    """Result tables contain arrows; a redirected Windows console would crash on them (cp1252)."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
