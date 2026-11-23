@@ -40,6 +40,22 @@ dependencies = [
     # grace/ui/overlay.py (M4): QtCore/QtGui/QtWidgets only; the Addons wheel is not needed.
     # abi3 wheel (cp310-abi3-win_amd64) installs on CPython 3.11. LGPL-3.0.
     "pyside6-essentials==6.11.3",
+    # grace/input (M5). ONE onnxruntime, CPU build (never onnxruntime-gpu): Silero VAD and
+    # openWakeWord run on it. 1.23.x matches the onnxruntime.dll that moonshine-voice 0.1.6 bundles
+    # for its own C++ core (the Python wheel links ORT statically into its .pyd, so the two never
+    # clash by DLL name). MIT. Needs protobuf>=4.25.8 transitively; mediapipe keeps it <5 (4.25.9).
+    "onnxruntime==1.23.2",
+    # Custom wake word (.onnx). Apache-2.0. Pulls scikit-learn + scipy (verifier models only).
+    "openwakeword==0.6.0",
+    # Local English STT, Small Streaming model (models/moonshine/). py3-none-win_amd64 wheel. MIT.
+    "moonshine-voice==0.1.6",
+]
+
+[project.optional-dependencies]
+# uv sync --extra stt-whisper : Hindi / accurate dictation offline (grace/input/stt/whisper_local.py).
+# Pulls ctranslate2 4.9.1, av, tokenizers, huggingface-hub. MIT.
+stt-whisper = [
+    "faster-whisper==1.2.1",
 ]
 
 [dependency-groups]
