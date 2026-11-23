@@ -108,6 +108,15 @@ uv run python -m grace --no-voice    # gestures + hotkeys only
 | `Ctrl+Alt+H` | Show / hide the conversation history panel |
 | `Ctrl+Alt+X` | Mark the last action as wrong (written to `logs/metrics/`) |
 
+A round microphone button sits left of the status chip: click it to switch the mic on or off
+(green = on, red slash = off, amber ring = capturing a command). It does the same as `Ctrl+Alt+M`
+and never takes keyboard focus, so the app you are typing in stays in front. Turn it off with
+`runtime.mic_button: false`.
+
+Left of it a round camera button switches gesture control (and the camera) on or off, like
+`Ctrl+Alt+G`; a red ring means the camera could not be opened. Turn it off with
+`runtime.gesture_button: false`.
+
 Every hotkey can be changed in the `hotkeys:` section of `settings.yaml`; start-up toggles, the
 wake word and the overlay are in `runtime:`. A short tone confirms each toggle.
 

@@ -4,8 +4,8 @@
     overlay = Overlay(bridge, on_toggle_shown=runtime.on_toggle_shown)
     overlay.show()
 
-Three small top-level windows, each frameless, translucent, always on top, without a taskbar
-entry (Qt.Tool), never activated or focused, and transparent for mouse and keyboard input
+Small top-level windows, each frameless, translucent, always on top, without a taskbar entry
+(Qt.Tool) and never activated or focused. Three are also transparent for mouse and keyboard input
 (WindowTransparentForInput sets WS_EX_TRANSPARENT on Windows, so clicks reach the app below):
 
 - subtitle bar, bottom-centre: what GRACE heard and replied; fades out ``fade_after_s`` after
@@ -13,6 +13,10 @@ entry (Qt.Tool), never activated or focused, and transparent for mouse and keybo
 - status chip, bottom-right: mic, gestures and the current gesture name, push-to-talk /
   listening / dictation flags, the LLM provider;
 - history panel (Ctrl+Alt+H), above the chip: the last dialogue turns.
+
+The mic and gesture buttons (docs/additions.md A-001, A-002), left of the chip, are the only
+windows that take mouse clicks. They still never take keyboard focus, so clicking one does not
+change which application is in front. More controls subclass ``FloatingButton``.
 
 All widget code runs on the Qt main thread: events arrive through the bus bridge signal
 (``grace.core.bus.qt_bridge``), which Qt queues onto this thread. Qt 6 makes the process per-
@@ -29,8 +33,17 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from PySide6.QtCore import QEasingCurve, QObject, QPropertyAnimation, Qt, QTimer, Slot
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtCore import (
+    QEasingCurve,
+    QObject,
+    QPointF,
+    QPropertyAnimation,
+    QRectF,
+    Qt,
+    QTimer,
+    Slot,
+)
+from PySide6.QtGui import QColor, QGuiApplication, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 from grace.core.bus import HEARD, REPLY, STATE, Event
@@ -115,7 +128,7 @@ OVERLAY_FLAGS = (
 
 
 class OverlayWindow(QWidget):
-    def __init__(self, font_pt: float, max_width_ratio: float) -> None:
+    def __init__(self, font_pt: float, max_width_ratio: float, wrap: bool = True) -> None:
         super().__init__(None, OVERLAY_FLAGS)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -124,7 +137,7 @@ class OverlayWindow(QWidget):
         self._max_width_ratio = max_width_ratio
         self.label = QLabel(self)
         self.label.setTextFormat(Qt.TextFormat.RichText)
-        self.label.setWordWrap(True)
+        self.label.setWordWrap(wrap)  # a wrapping QLabel picks a narrow width: chip stays 1 line
         self.label.setStyleSheet(f"{_PANEL_STYLE} font-size: {font_pt}pt;")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -202,7 +215,7 @@ class SubtitleBar(OverlayWindow):
 
 class StatusChip(OverlayWindow):
     def __init__(self) -> None:
-        super().__init__(font_pt=10.5, max_width_ratio=0.45)
+        super().__init__(font_pt=10.5, max_width_ratio=0.45, wrap=False)
 
     def place(self) -> None:
         area = self._area()
@@ -227,6 +240,174 @@ class HistoryPanel(OverlayWindow):
         self.move(x, max(area.y(), y))
 
 
+# --------------------------------------------------------------------------- clickable controls
+BUTTON_SIZE = 48
+BUTTON_GAP = 10  # between the button and the chip
+# Same as OVERLAY_FLAGS minus WindowTransparentForInput: it must receive clicks, but it must still
+# never take focus or activation (WS_EX_NOACTIVATE), so the app in front stays in front.
+CONTROL_FLAGS = (
+    Qt.WindowType.FramelessWindowHint
+    | Qt.WindowType.WindowStaysOnTopHint
+    | Qt.WindowType.Tool
+    | Qt.WindowType.WindowDoesNotAcceptFocus
+    | Qt.WindowType.NoDropShadowWindowHint
+)
+
+
+class FloatingButton(QWidget):
+    """Round, always-on-top, non-focusable button. A click (press and release inside) calls
+    ``on_click()`` on the Qt thread; the callback must return quickly. Subclasses draw the glyph."""
+
+    def __init__(self, on_click: Callable[[], None], tooltip: str = "") -> None:
+        super().__init__(None, CONTROL_FLAGS)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setFixedSize(BUTTON_SIZE, BUTTON_SIZE)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(tooltip)
+        self._on_click = on_click
+        self._down = False
+        self._hover = False
+
+    # -- look (subclasses) --------------------------------------------------------------------
+    def fill(self) -> QColor:
+        return QColor(30, 30, 34, 225)
+
+    def ring(self) -> QColor | None:
+        return None
+
+    def draw_glyph(self, p: QPainter, box: QRectF) -> None:  # overridden
+        pass
+
+    def paintEvent(self, _event: Any) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        box = QRectF(self.rect()).adjusted(3, 3, -3, -3)
+        colour = self.fill()
+        if self._down:
+            colour = colour.darker(130)
+        elif self._hover:
+            colour = colour.lighter(115)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(colour)
+        p.drawEllipse(box)
+        ring = self.ring()
+        if ring is not None:
+            p.setPen(QPen(ring, 3))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(box.adjusted(1.5, 1.5, -1.5, -1.5))
+        self.draw_glyph(p, box)
+
+    # -- input --------------------------------------------------------------------------------
+    def enterEvent(self, _event: Any) -> None:
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, _event: Any) -> None:
+        self._hover = False
+        self.update()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._down = True
+            self.update()
+        event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        was_down, self._down = self._down, False
+        self.update()
+        if was_down and event.button() == Qt.MouseButton.LeftButton:
+            if self.rect().contains(event.position().toPoint()):
+                try:
+                    self._on_click()
+                except Exception:  # noqa: BLE001 - a broken handler must not take the app down
+                    log.exception("button click handler failed")
+        event.accept()
+
+    def place_left_of(self, anchor: QWidget) -> None:
+        """Left of ``anchor`` (the chip or the next button), bottom edges aligned."""
+        screen = QGuiApplication.primaryScreen()
+        area = screen.availableGeometry() if screen else None
+        if area is None:
+            return
+        x = anchor.x() - self.width() - BUTTON_GAP
+        y = area.y() + area.height() - self.height() - MARGIN
+        self.move(max(area.x(), x), y)
+
+
+class MicButton(FloatingButton):
+    """Microphone on / off. Green with a mic when listening is on, dark with a red slash when off;
+    an amber ring while a command is being captured."""
+
+    def __init__(self, on_click: Callable[[], None], hotkey: str = "") -> None:
+        tip = "Microphone on/off" + (f" ({hotkey})" if hotkey else "")
+        super().__init__(on_click, tip)
+        self.on = True
+        self.listening = False
+
+    def set_state(self, on: bool, listening: bool) -> None:
+        if (on, listening) != (self.on, self.listening):
+            self.on, self.listening = on, listening
+            self.update()
+
+    def fill(self) -> QColor:
+        return QColor(46, 160, 82, 235) if self.on else QColor(38, 38, 42, 235)
+
+    def ring(self) -> QColor | None:
+        return QColor(255, 209, 102) if self.on and self.listening else None
+
+    def draw_glyph(self, p: QPainter, box: QRectF) -> None:
+        c = box.center()
+        colour = QColor(255, 255, 255) if self.on else QColor(190, 194, 198)
+        pen = QPen(colour, 2.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.setBrush(colour)
+        p.drawRoundedRect(QRectF(c.x() - 5, c.y() - 13, 10, 17), 5, 5)  # capsule
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(QRectF(c.x() - 9, c.y() - 8, 18, 16), 180 * 16, 180 * 16)  # cradle
+        p.drawLine(QPointF(c.x(), c.y() + 8), QPointF(c.x(), c.y() + 13))  # stem
+        p.drawLine(QPointF(c.x() - 5, c.y() + 13), QPointF(c.x() + 5, c.y() + 13))  # base
+        if not self.on:
+            p.setPen(QPen(QColor(235, 87, 87), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(QPointF(c.x() - 11, c.y() + 12), QPointF(c.x() + 11, c.y() - 12))
+
+
+class GestureButton(FloatingButton):
+    """Gesture control (camera) on / off. Green with a camera when on, dark with a red slash when
+    off; a red ring when gestures are on but the camera is missing or busy (state "NO CAMERA")."""
+
+    def __init__(self, on_click: Callable[[], None], hotkey: str = "") -> None:
+        tip = "Gesture control (camera) on/off" + (f" ({hotkey})" if hotkey else "")
+        super().__init__(on_click, tip)
+        self.on = False
+        self.no_camera = False
+
+    def set_state(self, on: bool, gesture: str) -> None:
+        no_camera = on and gesture == "NO CAMERA"
+        if (on, no_camera) != (self.on, self.no_camera):
+            self.on, self.no_camera = on, no_camera
+            self.update()
+
+    def fill(self) -> QColor:
+        return QColor(46, 160, 82, 235) if self.on else QColor(38, 38, 42, 235)
+
+    def ring(self) -> QColor | None:
+        return QColor(235, 87, 87) if self.no_camera else None
+
+    def draw_glyph(self, p: QPainter, box: QRectF) -> None:
+        c = box.center()
+        colour = QColor(255, 255, 255) if self.on else QColor(190, 194, 198)
+        p.setPen(QPen(colour, 2.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(QRectF(c.x() - 12, c.y() - 7, 24, 17), 4, 4)  # camera body
+        p.drawRect(QRectF(c.x() - 5, c.y() - 11, 10, 4))  # viewfinder bump
+        p.drawEllipse(c + QPointF(0, 1.5), 4.5, 4.5)  # lens
+        if not self.on:
+            p.setPen(QPen(QColor(235, 87, 87), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(QPointF(c.x() - 13, c.y() + 12), QPointF(c.x() + 13, c.y() - 12))
+
+
 # --------------------------------------------------------------------------- controller
 class Overlay(QObject):
     def __init__(
@@ -236,12 +417,24 @@ class Overlay(QObject):
         *,
         fade_after_s: float = 4.0,
         on_toggle_shown: Callable[[frozenset[str], float], None] | None = None,
+        on_mic_click: Callable[[float], None] | None = None,
+        mic_hotkey: str = "",
+        on_gesture_click: Callable[[float], None] | None = None,
+        gesture_hotkey: str = "",
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        """``on_mic_click(t)`` / ``on_gesture_click(t)`` get the monotonic time of the click;
+        None = no such button. Buttons line up leftwards from the chip: mic, then gesture."""
         super().__init__()
         self.subtitle = SubtitleBar(fade_after_s)
         self.chip = StatusChip()
         self.history = HistoryPanel(self.chip)
+        self.mic_button: MicButton | None = None
+        if on_mic_click is not None:
+            self.mic_button = MicButton(lambda: on_mic_click(clock()), mic_hotkey)
+        self.gesture_button: GestureButton | None = None
+        if on_gesture_click is not None:
+            self.gesture_button = GestureButton(lambda: on_gesture_click(clock()), gesture_hotkey)
         self._on_toggle_shown = on_toggle_shown
         self._clock = clock
         self.snapshot = initial
@@ -250,12 +443,26 @@ class Overlay(QObject):
         if screen is not None:
             screen.availableGeometryChanged.connect(self._replace)
 
+    def _buttons(self) -> list[FloatingButton]:
+        return [b for b in (self.mic_button, self.gesture_button) if b is not None]
+
+    def _windows(self) -> list[QWidget]:
+        return [self.subtitle, self.chip, self.history, *self._buttons()]
+
+    def _place_buttons(self) -> None:
+        anchor: QWidget = self.chip  # the chip changes width with its text: re-anchor each time
+        for button in self._buttons():
+            button.place_left_of(anchor)
+            anchor = button
+
     def show(self) -> None:
         self._apply_state(self.snapshot)
         self.chip.show()
+        for button in self._buttons():
+            button.show()
 
     def close(self) -> None:
-        for w in (self.subtitle, self.chip, self.history):
+        for w in self._windows():
             w.close()
 
     @Slot(object)
@@ -278,12 +485,19 @@ class Overlay(QObject):
         cause_t = event.data.get("cause_t")
         if cause_t is not None and changed & SHOWN_CHANGES:
             self.chip.repaint()  # paint now, so the measurement includes reaching the screen
+            for button in self._buttons():
+                button.repaint()
             latency_ms = (self._clock() - cause_t) * 1000
             if self._on_toggle_shown is not None:
                 self._on_toggle_shown(changed, latency_ms)
 
     def _apply_state(self, snap: StateSnapshot) -> None:
         self.chip.set_html(chip_html(snap))
+        if self.mic_button is not None:
+            self.mic_button.set_state(snap.mic_on, snap.listening)
+        if self.gesture_button is not None:
+            self.gesture_button.set_state(snap.gesture_on, snap.gesture)
+        self._place_buttons()
         if snap.history_visible:
             self.history.set_html(history_html(snap.turns))
             self.history.show()
@@ -293,6 +507,7 @@ class Overlay(QObject):
     def _replace(self, *_: Any) -> None:
         for w in (self.subtitle, self.chip, self.history):
             w.place()
+        self._place_buttons()
 
 
 def create_app(argv: list[str] | None = None) -> QApplication:

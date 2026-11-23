@@ -53,7 +53,9 @@ Rules that follow from the hardware:
    cancellation. Voice "gesture on/off" may exist but is never relied on.
 3. **No camera preview.** The only UI is a transparent, click-through overlay:
    - subtitle bar, bottom-centre of the primary screen: what GRACE heard and replied;
-   - status chip, bottom-right: mic, gesture, current recognised gesture name, provider in use.
+   - status chip, bottom-right: mic, gesture, current recognised gesture name, provider in use;
+   - amended 2026-11-23 (docs/additions.md A-001): a small clickable mic on/off button beside the
+     chip. It is the only window that takes clicks, and it never takes keyboard focus.
 4. **Offline-first.** Wake word, English STT, gestures and all fixed commands work with no network.
 5. **Risky actions** (shutdown, restart, close-all, send message) need exact phrasing **and**
    confirmation. No substring matching may trigger them.
@@ -214,6 +216,7 @@ confirmation · P7 CI, docs, PyPI release. **Out of scope:** head/face tracking.
 
 ## 9. Session workflow (humans)
 
+0. Read `docs/additions.md`: pending team suggestions that new code must not make harder to add.
 1. `git checkout main && git pull`, then `git checkout -b sNN-<milestone>`.
 2. Paste the whole `docs/prompts/sNN-*.md` file into the coding agent. Nothing else is needed.
 3. Agent ends with the report template. Run the manual hardware checks yourself.

@@ -146,10 +146,10 @@ class Runtime:
         self.state.add_turn("grace", text)
         self.bus.publish(REPLY, text=text)
 
-    def _toggled(self, what: str, on: bool) -> None:
+    def _toggled(self, what: str, on: bool, source: str) -> None:
         self.earcons.play("on" if on else "off")
-        self.metrics.write("toggle", what=what, on=on)
-        log.info("%s %s", what, "on" if on else "off")
+        self.metrics.write("toggle", what=what, on=on, source=source)
+        log.info("%s %s (%s)", what, "on" if on else "off", source)
 
     # ------------------------------------------------------------------ hotkey handlers
     def handlers(self) -> dict[str, Callable[[float], None]]:
@@ -164,27 +164,28 @@ class Runtime:
             "mark_wrong": self.mark_wrong,
         }
 
-    def set_mic(self, on: bool, t: float | None = None) -> None:
+    # ``source`` says which route the user took: "hotkey" (default), "button" or "voice".
+    def set_mic(self, on: bool, t: float | None = None, source: str = "hotkey") -> None:
         if not self.state.update(t, mic_on=on):
             return
         if self.voice is not None:
             if not on:
                 self.voice.cancel()
             self.voice.wake()
-        self._toggled("mic", on)
+        self._toggled("mic", on, source)
 
-    def toggle_mic(self, t: float | None = None) -> None:
-        self.set_mic(not self.state.mic_on, t)
+    def toggle_mic(self, t: float | None = None, source: str = "hotkey") -> None:
+        self.set_mic(not self.state.mic_on, t, source)
 
-    def set_gestures(self, on: bool, t: float | None = None) -> None:
+    def set_gestures(self, on: bool, t: float | None = None, source: str = "hotkey") -> None:
         if not self.state.update(t, gesture_on=on):
             return
         if self.gestures is not None:
             self.gestures.set_enabled(on)
-        self._toggled("gestures", on)
+        self._toggled("gestures", on, source)
 
-    def toggle_gestures(self, t: float | None = None) -> None:
-        self.set_gestures(not self.state.gesture_on, t)
+    def toggle_gestures(self, t: float | None = None, source: str = "hotkey") -> None:
+        self.set_gestures(not self.state.gesture_on, t, source)
 
     def ptt_press(self, t: float | None = None) -> None:
         self.state.update(t, ptt_active=True)

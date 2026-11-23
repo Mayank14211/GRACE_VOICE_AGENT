@@ -228,6 +228,19 @@ def run(settings: Settings, args: argparse.Namespace) -> int:
             state.snapshot(),
             fade_after_s=rt.subtitle_fade_s,
             on_toggle_shown=runtime.on_toggle_shown,
+            # No voice = nothing for the mic button to switch, so it is not shown.
+            on_mic_click=(
+                (lambda t: runtime.toggle_mic(t, source="button"))
+                if rt.mic_button and not args.no_voice
+                else None
+            ),
+            mic_hotkey=settings.hotkeys.mic_toggle,
+            on_gesture_click=(
+                (lambda t: runtime.toggle_gestures(t, source="button"))
+                if rt.gesture_button
+                else None
+            ),
+            gesture_hotkey=settings.hotkeys.gesture_toggle,
         )
         bridge.event.connect(lambda e: app.quit() if e.topic == QUIT else None)
 
