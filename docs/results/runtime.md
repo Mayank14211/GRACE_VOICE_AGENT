@@ -44,3 +44,5 @@ Date: ____  Tester: ____  Machine: ____  Power mode: ____  Duration: ____ min
 | 12 | Mic button x10 (click) | flips mic, tone plays, typing app keeps focus (caret keeps blinking) | | |
 | 13 | Mic button vs Ctrl+Alt+M | same result; metrics `toggle` rows show `source` button / hotkey | | |
 | 14 | Mic button latency | click-to-chip median < 200 ms in the summary line | | |
+| 15 | Camera button x10 (click) | gestures and camera LED flip together, tone plays, typing app keeps focus | | |
+| 16 | Camera button with the camera in use elsewhere | red ring and chip says `NO CAMERA`; recovers when the other app closes it | | |
