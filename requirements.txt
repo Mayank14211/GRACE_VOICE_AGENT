@@ -22,8 +22,12 @@ cffi==2.1.1
     #   soundfile
 charset-normalizer==3.5.2
     # via requests
+cloudpickle==3.1.3
+    # via joblib
 colorama==0.4.6 ; sys_platform == 'win32'
     # via tqdm
+coloredlogs==15.0.1
+    # via onnxruntime
 comtypes==1.4.12 ; sys_platform == 'win32'
     # via
     #   grace
@@ -37,8 +41,12 @@ cycler==0.12.1
     # via matplotlib
 distro==1.9.0
     # via openai
+filelock==4.3.0
+    # via moonshine-voice
 flatbuffers==25.12.19
-    # via mediapipe
+    # via
+    #   mediapipe
+    #   onnxruntime
 fonttools==4.68.0
     # via matplotlib
 google-ai-generativelanguage==0.4.0
@@ -51,6 +59,8 @@ google-auth==2.63.0
     # via
     #   google-api-core
     #   google-generativeai
+google-crc32c==1.9.0
+    # via moonshine-voice
 google-generativeai==0.3.1
     # via grace
 googleapis-common-protos==1.75.0
@@ -71,6 +81,8 @@ httpx==0.27.2
     # via
     #   grace
     #   openai
+humanfriendly==10.0
+    # via coloredlogs
 idna==3.20
     # via
     #   anyio
@@ -82,6 +94,8 @@ jaxlib==0.4.38
     # via
     #   jax
     #   mediapipe
+joblib==1.6.0
+    # via scikit-learn
 keyboard==0.13.5 ; sys_platform == 'win32'
     # via grace
 kiwisolver==1.5.1
@@ -94,8 +108,14 @@ ml-dtypes==0.5.4
     # via
     #   jax
     #   jaxlib
+moonshine-voice==0.1.6
+    # via grace
 mouseinfo==0.1.3
     # via pyautogui
+mpmath==1.3.0
+    # via sympy
+narwhals==2.29.0
+    # via scikit-learn
 numpy==1.24.3
     # via
     #   contourpy
@@ -105,17 +125,28 @@ numpy==1.24.3
     #   matplotlib
     #   mediapipe
     #   ml-dtypes
+    #   moonshine-voice
+    #   onnxruntime
     #   opencv-contrib-python
+    #   scikit-learn
     #   scipy
+    #   tflite-runtime
+onnxruntime==1.23.2
+    # via
+    #   grace
+    #   openwakeword
 openai==1.3.0
     # via grace
 opencv-contrib-python==4.11.0.86
     # via mediapipe
+openwakeword==0.6.0
+    # via grace
 opt-einsum==3.4.0
     # via jax
 packaging==26.3
     # via
     #   matplotlib
+    #   onnxruntime
     #   pytesseract
 pillow==9.5.0
     # via
@@ -123,6 +154,8 @@ pillow==9.5.0
     #   matplotlib
     #   pyscreeze
     #   pytesseract
+platformdirs==4.14.8
+    # via moonshine-voice
 proto-plus==1.28.2
     # via
     #   google-ai-generativelanguage
@@ -135,6 +168,7 @@ protobuf==4.25.9
     #   googleapis-common-protos
     #   grpcio-status
     #   mediapipe
+    #   onnxruntime
     #   proto-plus
 psutil==7.2.2 ; sys_platform == 'win32'
     # via pycaw
@@ -142,8 +176,6 @@ pyasn1==0.6.5
     # via pyasn1-modules
 pyasn1-modules==0.4.2
     # via google-auth
-pyaudio==0.2.13
-    # via grace
 pyautogui==0.9.54
     # via grace
 pycaw==20240210 ; sys_platform == 'win32'
@@ -904,6 +936,8 @@ pypiwin32==223 ; sys_platform == 'win32'
     # via
     #   pyttsx3
     #   screen-brightness-control
+pyreadline3==3.5.6 ; sys_platform == 'win32'
+    # via humanfriendly
 pyrect==0.2.0
     # via pygetwindow
 pyscreeze==1.0.1
@@ -936,13 +970,18 @@ pyyaml==6.0.4
 requests==2.34.2
     # via
     #   google-api-core
-    #   speechrecognition
+    #   moonshine-voice
+    #   openwakeword
 rubicon-objc==0.6.0 ; sys_platform == 'darwin'
     # via mouseinfo
+scikit-learn==1.9.1
+    # via openwakeword
 scipy==1.15.3
     # via
     #   jax
     #   jaxlib
+    #   openwakeword
+    #   scikit-learn
 screen-brightness-control==0.24.2
     # via grace
 shiboken6==6.11.3
@@ -955,14 +994,21 @@ sounddevice==0.4.6
     # via
     #   grace
     #   mediapipe
+    #   moonshine-voice
 soundfile==0.12.1
     # via grace
-speechrecognition==3.10.0
-    # via grace
+sympy==1.14.0
+    # via onnxruntime
+tflite-runtime==2.14.0 ; sys_platform == 'linux'
+    # via openwakeword
+threadpoolctl==3.8.0
+    # via scikit-learn
 tqdm==4.70.1
     # via
     #   google-generativeai
+    #   moonshine-voice
     #   openai
+    #   openwakeword
 typing-extensions==4.16.0
     # via
     #   grpcio
