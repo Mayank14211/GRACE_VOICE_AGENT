@@ -28,6 +28,7 @@ runtime:
   mic_on_at_start: true       # Ctrl+Alt+M toggles it
   gestures_on_at_start: false # Ctrl+Alt+G toggles it; the camera is only open while it is on
   mic_button: true            # clickable mic on/off button next to the status chip (never takes focus)
+  gesture_button: true        # clickable camera on/off button left of the mic button
   wake_word: listen           # word for the current (Google STT) voice loop; replaced in M5
   overlay: true               # subtitle bar + status chip (false = console only)
   subtitle_fade_s: 4.0        # the subtitle fades this long after the last line

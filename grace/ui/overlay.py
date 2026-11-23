@@ -14,9 +14,9 @@ Small top-level windows, each frameless, translucent, always on top, without a t
   listening / dictation flags, the LLM provider;
 - history panel (Ctrl+Alt+H), above the chip: the last dialogue turns.
 
-The fourth window, the mic button (docs/additions.md A-001), left of the chip, is the only one
-that takes mouse clicks. It still never takes keyboard focus, so clicking it does not change which
-application is in front. More controls subclass ``FloatingButton``.
+The mic and gesture buttons (docs/additions.md A-001, A-002), left of the chip, are the only
+windows that take mouse clicks. They still never take keyboard focus, so clicking one does not
+change which application is in front. More controls subclass ``FloatingButton``.
 
 All widget code runs on the Qt main thread: events arrive through the bus bridge signal
 (``grace.core.bus.qt_bridge``), which Qt queues onto this thread. Qt 6 makes the process per-
@@ -325,13 +325,13 @@ class FloatingButton(QWidget):
                     log.exception("button click handler failed")
         event.accept()
 
-    def place_beside(self, chip: QWidget) -> None:
-        """Left of the status chip, bottom edges aligned."""
+    def place_left_of(self, anchor: QWidget) -> None:
+        """Left of ``anchor`` (the chip or the next button), bottom edges aligned."""
         screen = QGuiApplication.primaryScreen()
         area = screen.availableGeometry() if screen else None
         if area is None:
             return
-        x = chip.x() - self.width() - BUTTON_GAP
+        x = anchor.x() - self.width() - BUTTON_GAP
         y = area.y() + area.height() - self.height() - MARGIN
         self.move(max(area.x(), x), y)
 
@@ -373,6 +373,41 @@ class MicButton(FloatingButton):
             p.drawLine(QPointF(c.x() - 11, c.y() + 12), QPointF(c.x() + 11, c.y() - 12))
 
 
+class GestureButton(FloatingButton):
+    """Gesture control (camera) on / off. Green with a camera when on, dark with a red slash when
+    off; a red ring when gestures are on but the camera is missing or busy (state "NO CAMERA")."""
+
+    def __init__(self, on_click: Callable[[], None], hotkey: str = "") -> None:
+        tip = "Gesture control (camera) on/off" + (f" ({hotkey})" if hotkey else "")
+        super().__init__(on_click, tip)
+        self.on = False
+        self.no_camera = False
+
+    def set_state(self, on: bool, gesture: str) -> None:
+        no_camera = on and gesture == "NO CAMERA"
+        if (on, no_camera) != (self.on, self.no_camera):
+            self.on, self.no_camera = on, no_camera
+            self.update()
+
+    def fill(self) -> QColor:
+        return QColor(46, 160, 82, 235) if self.on else QColor(38, 38, 42, 235)
+
+    def ring(self) -> QColor | None:
+        return QColor(235, 87, 87) if self.no_camera else None
+
+    def draw_glyph(self, p: QPainter, box: QRectF) -> None:
+        c = box.center()
+        colour = QColor(255, 255, 255) if self.on else QColor(190, 194, 198)
+        p.setPen(QPen(colour, 2.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(QRectF(c.x() - 12, c.y() - 7, 24, 17), 4, 4)  # camera body
+        p.drawRect(QRectF(c.x() - 5, c.y() - 11, 10, 4))  # viewfinder bump
+        p.drawEllipse(c + QPointF(0, 1.5), 4.5, 4.5)  # lens
+        if not self.on:
+            p.setPen(QPen(QColor(235, 87, 87), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(QPointF(c.x() - 13, c.y() + 12), QPointF(c.x() + 13, c.y() - 12))
+
+
 # --------------------------------------------------------------------------- controller
 class Overlay(QObject):
     def __init__(
@@ -384,9 +419,12 @@ class Overlay(QObject):
         on_toggle_shown: Callable[[frozenset[str], float], None] | None = None,
         on_mic_click: Callable[[float], None] | None = None,
         mic_hotkey: str = "",
+        on_gesture_click: Callable[[float], None] | None = None,
+        gesture_hotkey: str = "",
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        """``on_mic_click(t)`` gets the monotonic time of the click; None = no mic button."""
+        """``on_mic_click(t)`` / ``on_gesture_click(t)`` get the monotonic time of the click;
+        None = no such button. Buttons line up leftwards from the chip: mic, then gesture."""
         super().__init__()
         self.subtitle = SubtitleBar(fade_after_s)
         self.chip = StatusChip()
@@ -394,6 +432,9 @@ class Overlay(QObject):
         self.mic_button: MicButton | None = None
         if on_mic_click is not None:
             self.mic_button = MicButton(lambda: on_mic_click(clock()), mic_hotkey)
+        self.gesture_button: GestureButton | None = None
+        if on_gesture_click is not None:
+            self.gesture_button = GestureButton(lambda: on_gesture_click(clock()), gesture_hotkey)
         self._on_toggle_shown = on_toggle_shown
         self._clock = clock
         self.snapshot = initial
@@ -402,15 +443,23 @@ class Overlay(QObject):
         if screen is not None:
             screen.availableGeometryChanged.connect(self._replace)
 
+    def _buttons(self) -> list[FloatingButton]:
+        return [b for b in (self.mic_button, self.gesture_button) if b is not None]
+
     def _windows(self) -> list[QWidget]:
-        extra = [self.mic_button] if self.mic_button is not None else []
-        return [self.subtitle, self.chip, self.history, *extra]
+        return [self.subtitle, self.chip, self.history, *self._buttons()]
+
+    def _place_buttons(self) -> None:
+        anchor: QWidget = self.chip  # the chip changes width with its text: re-anchor each time
+        for button in self._buttons():
+            button.place_left_of(anchor)
+            anchor = button
 
     def show(self) -> None:
         self._apply_state(self.snapshot)
         self.chip.show()
-        if self.mic_button is not None:
-            self.mic_button.show()
+        for button in self._buttons():
+            button.show()
 
     def close(self) -> None:
         for w in self._windows():
@@ -436,8 +485,8 @@ class Overlay(QObject):
         cause_t = event.data.get("cause_t")
         if cause_t is not None and changed & SHOWN_CHANGES:
             self.chip.repaint()  # paint now, so the measurement includes reaching the screen
-            if self.mic_button is not None:
-                self.mic_button.repaint()
+            for button in self._buttons():
+                button.repaint()
             latency_ms = (self._clock() - cause_t) * 1000
             if self._on_toggle_shown is not None:
                 self._on_toggle_shown(changed, latency_ms)
@@ -446,7 +495,9 @@ class Overlay(QObject):
         self.chip.set_html(chip_html(snap))
         if self.mic_button is not None:
             self.mic_button.set_state(snap.mic_on, snap.listening)
-            self.mic_button.place_beside(self.chip)  # the chip changes width with its text
+        if self.gesture_button is not None:
+            self.gesture_button.set_state(snap.gesture_on, snap.gesture)
+        self._place_buttons()
         if snap.history_visible:
             self.history.set_html(history_html(snap.turns))
             self.history.show()
@@ -456,8 +507,7 @@ class Overlay(QObject):
     def _replace(self, *_: Any) -> None:
         for w in (self.subtitle, self.chip, self.history):
             w.place()
-        if self.mic_button is not None:
-            self.mic_button.place_beside(self.chip)
+        self._place_buttons()
 
 
 def create_app(argv: list[str] | None = None) -> QApplication:

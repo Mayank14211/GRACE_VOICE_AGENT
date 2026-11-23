@@ -308,3 +308,69 @@ def test_status_chip_is_a_single_line(overlay) -> None:  # type: ignore[no-untyp
     line = ov.chip.label.fontMetrics().height()
     assert ov.chip.height() < line * 2.5, ov.chip.height()
     assert ov.chip.width() > ov.chip.height() * 5
+
+
+# --------------------------------------------------------------------------- gesture button (A-002)
+@pytest.fixture
+def with_buttons(qtbot):  # type: ignore[no-untyped-def]
+    bus = EventBus()
+    state = AppState(bus)
+    bridge = qt_bridge(bus, ("state", HEARD, REPLY))
+    mic: list[float] = []
+    cam: list[float] = []
+    ov = Overlay(
+        bridge,
+        state.snapshot(),
+        on_mic_click=mic.append,
+        on_gesture_click=cam.append,
+        gesture_hotkey="ctrl+alt+g",
+    )
+    ov.show()
+    yield ov, bus, state, mic, cam
+    ov.close()
+
+
+@pytest.mark.windows
+def test_gesture_button_takes_clicks_but_never_focus(with_buttons, qtbot) -> None:  # type: ignore[no-untyped-def]
+    ov, _, _, mic, cam = with_buttons
+    btn = ov.gesture_button
+    assert not btn.windowFlags() & Qt.WindowType.WindowTransparentForInput
+    assert btn.windowFlags() & Qt.WindowType.WindowDoesNotAcceptFocus
+    assert btn.focusPolicy() == Qt.FocusPolicy.NoFocus and "ctrl+alt+g" in btn.toolTip()
+    qtbot.mouseClick(btn, Qt.MouseButton.LeftButton)
+    assert len(cam) == 1 and mic == []  # each button only calls its own handler
+
+
+@pytest.mark.windows
+def test_buttons_line_up_leftwards_from_the_chip(with_buttons) -> None:  # type: ignore[no-untyped-def]
+    ov, bus, state, *_ = with_buttons
+    mic, cam, chip = ov.mic_button, ov.gesture_button, ov.chip
+    assert cam.geometry().right() < mic.geometry().left() < mic.geometry().right()
+    assert mic.geometry().right() < chip.geometry().left()
+    assert cam.y() == mic.y()
+    state.update(gesture_on=True, gesture="SCROLL", ptt_active=True)
+    bus.pump()  # the chip's text changes; both buttons keep their places relative to it
+    assert mic.x() == max(0, chip.x() - mic.width() - BUTTON_GAP)
+    assert cam.x() == max(0, mic.x() - cam.width() - BUTTON_GAP)
+
+
+@pytest.mark.windows
+def test_gesture_button_mirrors_state_and_camera_problems(with_buttons) -> None:  # type: ignore[no-untyped-def]
+    ov, bus, state, *_ = with_buttons
+    btn = ov.gesture_button
+    assert not btn.on and btn.ring() is None  # gestures start off
+    state.update(gesture_on=True, gesture="READY")
+    bus.pump()
+    assert btn.on and btn.ring() is None
+    state.update(gesture="NO CAMERA")
+    bus.pump()
+    assert btn.on and btn.ring() is not None  # on, but the camera is missing / busy
+    state.update(gesture_on=False, gesture="OFF")
+    bus.pump()
+    assert not btn.on and btn.ring() is None
+    assert btn.grab().width() > 0  # paints in every look
+
+
+def test_only_requested_buttons_exist(overlay) -> None:  # type: ignore[no-untyped-def]
+    ov, *_ = overlay
+    assert ov.mic_button is None and ov.gesture_button is None

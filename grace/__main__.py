@@ -235,6 +235,12 @@ def run(settings: Settings, args: argparse.Namespace) -> int:
                 else None
             ),
             mic_hotkey=settings.hotkeys.mic_toggle,
+            on_gesture_click=(
+                (lambda t: runtime.toggle_gestures(t, source="button"))
+                if rt.gesture_button
+                else None
+            ),
+            gesture_hotkey=settings.hotkeys.gesture_toggle,
         )
         bridge.event.connect(lambda e: app.quit() if e.topic == QUIT else None)
 
