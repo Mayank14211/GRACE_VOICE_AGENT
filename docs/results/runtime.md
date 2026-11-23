@@ -41,3 +41,6 @@ Date: ____  Tester: ____  Machine: ____  Power mode: ____  Duration: ____ min
 | 9 | Overlay | click-through, never takes focus, not in taskbar / Alt+Tab | | |
 | 10 | CPU (metrics summary) | recorded | mean ___ %, max ___ % of the machine | |
 | 11 | CPU (Task Manager, 2/5/9 min) | recorded | ___ / ___ / ___ % | |
+| 12 | Mic button x10 (click) | flips mic, tone plays, typing app keeps focus (caret keeps blinking) | | |
+| 13 | Mic button vs Ctrl+Alt+M | same result; metrics `toggle` rows show `source` button / hotkey | | |
+| 14 | Mic button latency | click-to-chip median < 200 ms in the summary line | | |
