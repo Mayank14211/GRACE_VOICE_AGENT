@@ -54,8 +54,10 @@ openWakeWord's README links two Google Colab notebooks:
      audio, so the model learns that room noise and the team's normal talk are not the word;
    - export **ONNX** (GRACE runs openWakeWord on onnxruntime, not tflite).
 
-Save the result as `models/wakeword/grace.onnx` (or point `wakeword.model_path` at it). Model
-files are git-ignored; keep the trained file in the team drive and note its sha256:
+Save the result as `models/wakeword/grace.onnx` (or point `wakeword.model_path` at it), and set
+`runtime.wake_word` to the word as it is written (e.g. `grace`): when someone says the command in
+the same breath, any leftover of the word at the start of the transcript is removed using that
+text. Model files are git-ignored; keep the trained file in the team drive and note its sha256:
 
 ```powershell
 Get-FileHash models\wakeword\grace.onnx -Algorithm SHA256
@@ -111,4 +113,4 @@ wake word. A detection plays a tone and opens the follow-up window: the next utt
 Silero VAD) is transcribed and run as a command, then GRACE keeps listening without the wake word
 for `follow_up_s`. Say "stop listening" to close the window early. Speaking the command in the
 same breath ("hey grace, open notepad") works: the command starts after the detection, and any
-leftover of the wake word at the start of the transcript is dropped.
+leftover of the wake word (`runtime.wake_word`) at the start of the transcript is dropped.

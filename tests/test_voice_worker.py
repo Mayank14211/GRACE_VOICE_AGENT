@@ -479,6 +479,28 @@ def test_push_to_talk_opens_the_mic_while_it_is_off() -> None:
     assert h.commands == ["volume 25"]
 
 
+def test_push_to_talk_never_prepends_audio_from_before_the_mic_closed() -> None:
+    h = Harness(["volume 25"])
+    mic = [True]
+    loud_then_quiet = [SPEECH] * 3  # heard while the mic was on, then it is switched off
+    source = FakeSource(loud_then_quiet)
+    w, _ = worker_for(h, source, mic)
+    for _ in range(3):
+        w.step()
+    mic[0] = False
+    w.wake()
+    w.step()  # closes the mic
+    w.request_ptt()  # minutes later, with the mic off
+    source.frames = [SILENCE] * 4
+    for _ in range(5):
+        w.step()
+    w.release_ptt()
+    w.step()
+    h.run_stt()
+    (audio,) = h.engine.utterances[-1:]
+    assert len(audio) == 4 * FRAME and not audio.any()  # only what came after the key
+
+
 def test_a_missing_mic_is_reported_once_and_retried_later() -> None:
     h = Harness()
     source = FakeSource(fail="no input device")

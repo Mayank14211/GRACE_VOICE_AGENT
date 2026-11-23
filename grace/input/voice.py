@@ -216,11 +216,16 @@ class ListenPipeline:
         self.deadline = now + max(self.follow_up_s, FIRST_COMMAND_S)
         self._publish_listening()
 
+    def _go_idle(self) -> None:
+        self.phase = self._rest_phase()
+        if self.wake is not None:
+            self.wake.reset()  # no stale audio from before the wake word in its features
+
     def _after_command(self, now: float) -> None:
         if self.wake_mode == "off" or self.phase != "active":
             return
         if self.follow_up_s <= 0 and not self._is_dictation():
-            self.phase = "idle"
+            self._go_idle()
         else:
             self.deadline = now + self.follow_up_s
         self._publish_listening()
@@ -301,7 +306,7 @@ class ListenPipeline:
                 and not self.ptt_held
                 and not self._is_dictation()
             ):
-                self.phase = "idle"
+                self._go_idle()
                 self._publish_listening()
 
     def wants_audio(self) -> bool:
@@ -318,6 +323,12 @@ class ListenPipeline:
             self._recent.clear()
             if self.wake_mode == "off":
                 self.phase = "active"
+
+    def mic_closed(self) -> None:
+        """Forget recent audio: push-to-talk must not prepend audio from before the mic closed."""
+        with self._lock:
+            self._recent.clear()
+            self.seg.reset()
 
     # ------------------------------------------------------------------ control (any thread)
     def ptt_down(self) -> None:
@@ -351,7 +362,7 @@ class ListenPipeline:
             self._cancel_open()
             self.ptt_held = False
             self.seg.reset()
-            self.phase = self._rest_phase()
+            self._go_idle()
             was_dictating = self._is_dictation()
             self._publish_listening()
         if was_dictating:
@@ -360,8 +371,7 @@ class ListenPipeline:
     def end_session(self) -> None:
         """'stop listening': close the follow-up window now."""
         with self._lock:
-            if self.wake_mode != "off":
-                self.phase = "idle"
+            self._go_idle()
             self._publish_listening()
 
     # ------------------------------------------------------------------ STT thread
@@ -604,6 +614,7 @@ class VoiceWorker:
             self.pipeline.mic_opened()
         elif not want and self.source.is_open:
             self.source.stop()
+            self.pipeline.mic_closed()
         if not self.source.is_open:
             self._wake.wait(0.5 if not want else read_timeout)
             self._wake.clear()
