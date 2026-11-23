@@ -1,6 +1,7 @@
 """Regenerate the VAD test fixtures in tests/fixtures/audio/ (Windows: uses SAPI voices).
 
     uv run python scripts/make_audio_fixtures.py
+    uv run python scripts/make_audio_fixtures.py --eval-set data/synthetic_eval
 
 Writes 16 kHz mono 16-bit WAVs with seeded low-level room noise:
     silence.wav       4 s of noise, no speech
@@ -10,10 +11,15 @@ Writes 16 kHz mono 16-bit WAVs with seeded low-level room noise:
 and copies Silero VAD (hash-checked, from models/) to tests/fixtures/audio/silero_vad.onnx so
 the tests run without models/. These are synthetic voices: the team's real recordings for
 accuracy and latency go in tests/audio/ (see tests/audio/README.md).
+
+--eval-set DIR: every phrase in tests/audio/phrases.txt in every installed SAPI voice, plus
+transcripts.csv, for a first (synthetic) scripts/eval_stt.py run before the team records.
 """
 
 from __future__ import annotations
 
+import argparse
+import csv
 import shutil
 import sys
 import tempfile
@@ -32,13 +38,15 @@ OUT = ROOT / "tests" / "fixtures" / "audio"
 NOISE = 0.003  # about -50 dBFS: a quiet room
 
 
-def say(text: str, rate: int = 170) -> np.ndarray:
+def say(text: str, rate: int = 170, voice_id: str | None = None) -> np.ndarray:
     import pyttsx3
 
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "say.wav"
         engine = pyttsx3.init()
         engine.setProperty("rate", rate)
+        if voice_id:
+            engine.setProperty("voice", voice_id)
         engine.save_to_file(text, str(path))
         engine.runAndWait()
         speech = load_wav(path)
@@ -51,16 +59,51 @@ def gap(seconds: float) -> np.ndarray:
     return np.zeros(int(seconds * SAMPLE_RATE), dtype=np.float32)
 
 
-def write(name: str, parts: list[np.ndarray], rng: np.random.Generator) -> None:
+def write(
+    name: str, parts: list[np.ndarray], rng: np.random.Generator, out: Path = OUT, quiet=False
+) -> None:
     import soundfile as sf
 
     audio = np.concatenate(parts)
     audio = audio + rng.normal(0.0, NOISE, len(audio)).astype(np.float32)
-    sf.write(OUT / name, np.clip(audio, -1, 1), SAMPLE_RATE, subtype="PCM_16")
-    print(f"  {name}: {len(audio) / SAMPLE_RATE:.2f} s")
+    sf.write(out / name, np.clip(audio, -1, 1), SAMPLE_RATE, subtype="PCM_16")
+    if not quiet:
+        print(f"  {name}: {len(audio) / SAMPLE_RATE:.2f} s")
 
 
-def main() -> int:
+def eval_set(out: Path, phrases_file: Path = ROOT / "tests" / "audio" / "phrases.txt") -> int:
+    import pyttsx3
+
+    phrases = [
+        line.strip()
+        for line in phrases_file.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    voices = [(v.id, v.name.split(" - ")[0].replace("Microsoft ", "").split()[0].lower())
+              for v in pyttsx3.init().getProperty("voices")]  # fmt: skip
+    out.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(11)
+    rows = []
+    for voice_id, speaker in voices:
+        for i, phrase in enumerate(phrases, 1):
+            name = f"sapi-{speaker}_{i:03d}.wav"
+            write(name, [gap(0.2), say(phrase, voice_id=voice_id), gap(0.3)], rng, out, True)
+            rows.append((name, phrase, f"sapi-{speaker}"))
+        print(f"  {speaker}: {len(phrases)} phrases")
+    with (out / "transcripts.csv").open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["file", "text", "speaker"])
+        writer.writerows(rows)
+    print(f"{len(rows)} recordings in {out}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--eval-set", type=Path, default=None, metavar="DIR")
+    args = parser.parse_args(argv)
+    if args.eval_set is not None:
+        return eval_set(args.eval_set)
     OUT.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(6)
     write("silence.wav", [gap(4.0)], rng)

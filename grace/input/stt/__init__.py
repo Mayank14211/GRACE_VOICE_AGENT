@@ -37,6 +37,7 @@ __all__ = [
     "SttEvent",
     "SttRouter",
     "build_stt_router",
+    "engine_factories",
     "select_engines",
     "transcribe",
 ]
@@ -132,8 +133,11 @@ def whisper_installed() -> bool:
     return importlib.util.find_spec("faster_whisper") is not None
 
 
-def build_stt_router(settings: Any) -> SttRouter:
-    """Engines from settings (grace.config.Settings). Nothing is loaded until it is needed."""
+def engine_factories(
+    settings: Any, *, threads: int | None = None
+) -> dict[str, Callable[[], SttEngine]]:
+    """name -> function that creates that engine from settings (nothing is loaded yet).
+    ``threads`` overrides inference.threads (scripts/bench_threads.py)."""
     from grace.models import MODELS_DIR, MOONSHINE_ARCHS, WHISPER_DIR, moonshine_dir
 
     stt = settings.stt
@@ -152,7 +156,7 @@ def build_stt_router(settings: Any) -> SttRouter:
 
         return WhisperLocalStt(
             stt.whisper_model,
-            threads=settings.inference.threads,
+            threads=threads or settings.inference.threads,
             language=lang,
             download_root=MODELS_DIR / WHISPER_DIR,
         )
@@ -168,8 +172,14 @@ def build_stt_router(settings: Any) -> SttRouter:
             max_retries=settings.router.max_retries,
         )
 
+    return {"moonshine": moonshine, "whisper_local": whisper_local, "groq": groq}
+
+
+def build_stt_router(settings: Any) -> SttRouter:
+    """Engines from settings (grace.config.Settings). Nothing is loaded until it is needed."""
+    stt = settings.stt
     return SttRouter(
-        {"moonshine": moonshine, "whisper_local": whisper_local, "groq": groq},
+        engine_factories(settings),
         language=settings.language,
         engine=stt.engine,
         dictation_accurate=stt.dictation_accurate,
