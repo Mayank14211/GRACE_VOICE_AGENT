@@ -98,6 +98,25 @@ def test_camera_opens() -> None:
     assert result.status == doctor.PASS, result.detail
 
 
+@pytest.mark.hardware
+@pytest.mark.windows
+def test_hand_tracker_runs_on_the_camera() -> None:
+    result = doctor.check_hand_tracker()
+    assert result.status == doctor.PASS, result.detail
+
+
+def test_gesture_map_check(tmp_path: Path) -> None:
+    result = doctor.check_gestures(tmp_path / "settings.yaml", tmp_path / ".env")
+    assert result.status == doctor.PASS and result.detail.startswith("8 poses mapped")
+    (tmp_path / "settings.yaml").write_text("gestures: {map: {three_up: none}}\n")
+    assert doctor.check_gestures(tmp_path / "settings.yaml", tmp_path / ".env").detail.startswith(
+        "7 poses"
+    )
+    (tmp_path / "settings.yaml").write_text("gestures: {map: {fist: explode}}\n")
+    bad = doctor.check_gestures(tmp_path / "settings.yaml", tmp_path / ".env")
+    assert bad.status == doctor.NOT_CONFIGURED
+
+
 def test_env_keys_match_config() -> None:
     from grace.config import ENV_KEYS
 

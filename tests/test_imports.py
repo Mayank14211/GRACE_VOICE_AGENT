@@ -8,7 +8,6 @@ import sys
 import warnings
 from pathlib import Path
 from types import ModuleType
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -36,19 +35,15 @@ def test_main_imports() -> None:
     assert hasattr(main, "GraceVoiceAgent")
 
 
-@pytest.mark.windows
-def test_hand_gesture_imports_without_hardware(mocker) -> None:
-    # Module level calls pyautogui.size() and opens the default speaker via pycaw.
-    mocker.patch("pyautogui.size", return_value=(1920, 1080))
-    speakers = MagicMock()
-    mocker.patch("pycaw.pycaw.AudioUtilities.GetSpeakers", return_value=speakers)
-    mocker.patch("ctypes.cast", return_value=MagicMock())
-
-    module = fresh_import("Hand_Gesture")
-
-    assert (module.screen_width, module.screen_height) == (1920, 1080)
-    speakers.Activate.assert_called_once()
-    assert hasattr(module, "GestureController")
+def test_gesture_engine_imports_without_camera_or_mediapipe() -> None:
+    # The pure modules must not pull in cv2 / mediapipe (lazy in the tracker) or touch the OS.
+    code = (
+        "import sys; import grace.input.gestures, grace.input.gestures.tracker, "
+        "grace.actions.executor; "
+        "bad = [m for m in ('cv2', 'mediapipe', 'pyautogui') if m in sys.modules]; "
+        "assert not bad, bad"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True, cwd=ROOT)
 
 
 @pytest.mark.windows

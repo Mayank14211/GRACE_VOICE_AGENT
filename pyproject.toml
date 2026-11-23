@@ -26,7 +26,8 @@ dependencies = [
     "pytesseract==0.3.10",
     "Pillow==9.5.0",
     "google-generativeai==0.3.1",
-    # Hand_Gesture.py (legacy mp.solutions API; versions match the known-working env)
+    # grace/input/gestures (legacy mp.solutions API) + grace/actions/system.py; pywin32 is unused
+    # since Hand_Gesture.py was removed in M3 (kept: pins are only removed deliberately)
     "mediapipe==0.10.14",
     "screen-brightness-control==0.24.2",
     "pycaw==20240210 ; sys_platform == 'win32'",
@@ -66,7 +67,6 @@ line-length = 100
 # Legacy modules are linted from M2 onward as they are replaced; new code must be clean.
 extend-exclude = [
     "main.py",
-    "Hand_Gesture.py",
     "screen_reader.py",
     "speech_recognition_module.py",
     "tts.py",

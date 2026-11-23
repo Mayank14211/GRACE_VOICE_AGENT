@@ -70,6 +70,15 @@ class FakeInput:
     def hotkey(self, *keys: str) -> None:
         self.calls.append(("hotkey", *keys))
 
+    def move_to(self, x: int, y: int) -> None:
+        self.calls.append(("move_to", x, y))
+
+    def mouse_down(self, button: str) -> None:
+        self.calls.append(("mouse_down", button))
+
+    def mouse_up(self, button: str) -> None:
+        self.calls.append(("mouse_up", button))
+
 
 @dataclass
 class FakeClipboard:

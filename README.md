@@ -95,11 +95,27 @@ Run the main application:
 uv run python main.py
 ```
 
-Run the standalone hand-gesture controller:
+Try hand gestures on their own (temporary runner until the S05 runtime runs voice and gestures
+together; no camera window, the console prints the recognised gesture):
 
 ```bash
-uv run python Hand_Gesture.py
+uv run python -m grace.input.gestures --dry-run   # recognise only; the OS is not touched
+uv run python -m grace.input.gestures             # live: mouse, scroll, volume, brightness
 ```
+
+| Pose | Action |
+|---|---|
+| Index finger up | Move the cursor (the middle 70% of the camera view covers the whole screen) |
+| Thumb–index pinch | Left click on release; hold > 0.4 s (or move while pinched) = drag |
+| Thumb–middle pinch | Right click |
+| Index + middle up | Scroll: move the hand up/down from where the pose started |
+| Index + middle + ring up | Brightness, same way |
+| Thumb + index + middle up | Volume, same way |
+| Fist held 1 s | Pause / resume gestures |
+| Open palm | Neutral (resets the starting point) |
+
+Every pose and threshold is in the `gestures:` section of `settings.yaml`. Record landmark
+fixtures for the tests with `uv run python scripts/record_gestures.py --hand right`.
 
 You can customize the wake word (API keys are never passed on the command line; see
 [Configuration](#configuration)):

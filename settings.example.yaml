@@ -44,12 +44,41 @@ wakeword:
                                          # (0 = wake word before every command)
 
 gestures:
+  # Try them without the full app: uv run python -m grace.input.gestures --dry-run
   camera_index: 0         # webcam index (0 = default camera)
+  frame_width: 640        # camera resolution requested (lower = faster tracking)
+  frame_height: 480
+  model_complexity: 1     # MediaPipe Hands model: 0 = faster, 1 = more accurate
+  min_detection_confidence: 0.7
+  min_tracking_confidence: 0.6
+  # Pose -> behaviour. Poses you leave out keep the default below; "none" turns a pose off.
+  # Poses: open_palm, fist, index_up, two_up (index+middle), three_up (index+middle+ring),
+  #        thumb_index_middle, pinch_index (thumb on index tip), pinch_middle (thumb on middle tip)
+  # Behaviours: cursor, left_click (hold = drag), right_click, scroll, volume, brightness,
+  #             pause (hold pause_hold_ms to pause/resume), neutral (resets entry points), none
+  map:
+    index_up: cursor
+    pinch_index: left_click
+    pinch_middle: right_click
+    two_up: scroll
+    three_up: brightness
+    thumb_index_middle: volume
+    fist: pause
+    open_palm: neutral
   hold_frames: 4          # frames a pose must hold before it activates (1-30)
   drag_hold_ms: 400       # pinch held longer than this starts a drag instead of a click
   pause_hold_ms: 1000     # fist held this long pauses / resumes gestures
+  pinch_on: 0.22          # pinch starts when thumb-fingertip distance / hand size drops below this
+  pinch_off: 0.32         # ...and ends when it rises above this (must be larger: hysteresis)
   deadzone: 0.05          # scroll / volume / brightness ignore offsets smaller than this (0-0.5)
   active_box_margin: 0.15 # frame margin excluded from the cursor box on each side (0-0.5)
+  # Speed per unit of hand offset beyond the deadzone (offset is a fraction of the frame height):
+  scroll_speed: 60.0      # wheel notches per second
+  volume_speed: 200.0     # volume points per second
+  brightness_speed: 200.0 # brightness points per second
+  max_os_calls_per_s: 10.0  # cap on scroll / volume / brightness calls (1-10)
+  cursor_min_cutoff: 1.0  # One Euro filter: lower = steadier cursor when the hand is still
+  cursor_beta: 10.0       # One Euro filter: higher = less lag when the hand moves fast
 
 router:
   # LLM fallback order for input the fixed grammar does not match.

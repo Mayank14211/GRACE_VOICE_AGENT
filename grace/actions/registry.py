@@ -70,6 +70,8 @@ class ActionSpec:
     description: str = ""
     # Short noun phrase used in the confirmation prompt, e.g. "shutdown" -> "Confirm shutdown?".
     confirm_label: str | None = None
+    # High-frequency actions (gesture cursor moves) log at DEBUG instead of INFO.
+    quiet: bool = False
 
     def __post_init__(self) -> None:
         if self.risky and not self.confirm_label:
@@ -95,6 +97,7 @@ class ActionRegistry:
         risky: bool = False,
         description: str = "",
         confirm_label: str | None = None,
+        quiet: bool = False,
     ) -> Callable[[Callable[[ArgsT], ActionResult]], Callable[[ArgsT], ActionResult]]:
         def decorator(handler: Callable[[ArgsT], ActionResult]) -> Callable[[ArgsT], ActionResult]:
             self.add(
@@ -105,6 +108,7 @@ class ActionRegistry:
                     risky=risky,
                     description=description or (handler.__doc__ or "").strip(),
                     confirm_label=confirm_label,
+                    quiet=quiet,
                 )
             )
             return handler
@@ -163,7 +167,9 @@ class ActionRegistry:
             except Exception:  # an OS call failed in an unexpected way; keep the app alive
                 log.exception("action %s crashed", name)
                 return ActionResult(False, "Sorry, that didn't work.")
-        log.info("action %s ok=%s", name, result.ok)  # args are not logged (typed text, clipboard)
+        level = logging.DEBUG if spec.quiet else logging.INFO
+        # Args are not logged (typed text, clipboard).
+        log.log(level, "action %s ok=%s", name, result.ok)
         return result
 
 

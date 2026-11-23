@@ -184,6 +184,33 @@ def test_click_and_scroll(reg) -> None:
     ]
 
 
+def test_pointer_actions_for_gestures(reg) -> None:
+    registry, b = reg
+    assert registry.execute("input.move_to", {"x": 10, "y": 20}).ok
+    assert registry.execute("input.mouse_down").ok
+    assert registry.execute("input.mouse_up", {"button": "left"}).ok
+    assert not registry.execute("input.move_to", {"x": -1, "y": 0}).ok
+    assert not registry.execute("input.mouse_down", {"button": "thumb"}).ok
+    assert b.input.calls == [("move_to", 10, 20), ("mouse_down", "left"), ("mouse_up", "left")]
+    assert registry.spec("input.move_to").quiet and not registry.spec("input.click").quiet
+
+
+def test_quiet_actions_log_at_debug(reg, caplog: pytest.LogCaptureFixture) -> None:
+    registry, _ = reg
+    with caplog.at_level("DEBUG", logger="grace.actions.registry"):
+        registry.execute("input.move_to", {"x": 1, "y": 1})
+        registry.execute("input.click")
+    levels = {r.getMessage().split()[1]: r.levelname for r in caplog.records}
+    assert levels == {"input.move_to": "DEBUG", "input.click": "INFO"}
+
+
+def test_pointer_primitives_are_not_llm_tools(reg) -> None:
+    from grace.intent.assistant import registry_tools
+
+    _, names = registry_tools(reg[0])
+    assert not {"input.move_to", "input.mouse_down", "input.mouse_up"} & set(names.values())
+
+
 def test_type_ascii_writes_once(reg) -> None:
     registry, b = reg
     registry.execute("input.type", {"text": "Hello, World!"})
