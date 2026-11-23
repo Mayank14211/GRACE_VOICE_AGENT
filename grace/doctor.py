@@ -40,8 +40,6 @@ IMPORTS: tuple[tuple[str, str, bool], ...] = (
     ("pyperclip", "pyperclip", False),
     ("keyboard", "keyboard", True),
     ("pyttsx3", "pyttsx3", False),
-    ("speech_recognition", "SpeechRecognition", False),
-    ("pyaudio", "PyAudio", False),
     ("sounddevice", "sounddevice", False),
     ("soundfile", "soundfile", False),
     ("numpy", "numpy", False),

@@ -13,9 +13,7 @@ dependencies = [
     "keyboard==0.13.5 ; sys_platform == 'win32'",
     # tts.py
     "pyttsx3==2.90",
-    # speech_recognition_module.py (sr.Microphone needs PyAudio)
-    "SpeechRecognition==3.10.0",
-    "PyAudio==0.2.13",
+    # grace/input/audio.py (mic stream; M5 removed SpeechRecognition + PyAudio)
     "sounddevice==0.4.6",
     "soundfile==0.12.1",
     "numpy==1.24.3",
@@ -89,7 +87,6 @@ line-length = 100
 extend-exclude = [
     "main.py",
     "screen_reader.py",
-    "speech_recognition_module.py",
     "tts.py",
     "tesseract_check.py",
     "test_screen_reader.py",

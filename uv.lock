@@ -465,7 +465,6 @@ dependencies = [
     { name = "openai" },
     { name = "openwakeword" },
     { name = "pillow" },
-    { name = "pyaudio" },
     { name = "pyautogui" },
     { name = "pycaw", marker = "sys_platform == 'win32'" },
     { name = "pydantic" },
@@ -479,7 +478,6 @@ dependencies = [
     { name = "screen-brightness-control" },
     { name = "sounddevice" },
     { name = "soundfile" },
-    { name = "speechrecognition" },
 ]
 
 [package.optional-dependencies]
@@ -510,7 +508,6 @@ requires-dist = [
     { name = "openai", specifier = "==1.3.0" },
     { name = "openwakeword", specifier = "==0.6.0" },
     { name = "pillow", specifier = "==9.5.0" },
-    { name = "pyaudio", specifier = "==0.2.13" },
     { name = "pyautogui", specifier = "==0.9.54" },
     { name = "pycaw", marker = "sys_platform == 'win32'", specifier = "==20240210" },
     { name = "pydantic", specifier = "==2.14.4" },
@@ -524,7 +521,6 @@ requires-dist = [
     { name = "screen-brightness-control", specifier = "==0.24.2" },
     { name = "sounddevice", specifier = "==0.4.6" },
     { name = "soundfile", specifier = "==0.12.1" },
-    { name = "speechrecognition", specifier = "==3.10.0" },
 ]
 provides-extras = ["stt-whisper"]
 
@@ -1102,16 +1098,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e9/e6/78ebbb10a8c8e4b61a59249394a4a594c1a7af95593dc933a349c8d00964/pyasn1_modules-0.4.2.tar.gz", hash = "sha256:677091de870a80aae844b1ca6134f54652fa2c8c5a52aa396440ac3106e941e6", size = 307892, upload-time = "2025-03-28T02:41:22.17Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/47/8d/d529b5d697919ba8c11ad626e835d4039be708a35b0d22de83a269a6682c/pyasn1_modules-0.4.2-py3-none-any.whl", hash = "sha256:29253a9207ce32b64c3ac6600edc75368f98473906e8fd1043bd6b5b1de2c14a", size = 181259, upload-time = "2025-03-28T02:41:19.028Z" },
-]
-
-[[package]]
-name = "pyaudio"
-version = "0.2.13"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/91/a0/f439da954d78a987298cb8d1ca1b141c53b1d1d1c7a50e17198ed061b9ac/PyAudio-0.2.13.tar.gz", hash = "sha256:26bccc81e4243d1c0ff5487e6b481de6329fcd65c79365c267cef38f363a2b56", size = 46820, upload-time = "2022-12-26T05:38:37.917Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/67/74/5854fce7276f420c6d232375b1fc07eed17a739426a30992ff4eab6c9c74/PyAudio-0.2.13-cp311-cp311-win32.whl", hash = "sha256:13915faaa780e6bbbb6d745ef0e761674fd461b1b1b3f9c1f57042a534bfc0c3", size = 144626, upload-time = "2022-12-26T05:38:24.153Z" },
-    { url = "https://files.pythonhosted.org/packages/f1/9d/a355e572556ea1b41d76514323360c13774820d094c674cf51f37aee6cbe/PyAudio-0.2.13-cp311-cp311-win_amd64.whl", hash = "sha256:59cc3cc5211b729c7854e3989058a145872cc58b1a7b46c6d4d88448a343d890", size = 164070, upload-time = "2022-12-26T05:38:25.936Z" },
 ]
 
 [[package]]
@@ -3949,18 +3935,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c1/07/7591f4efd29e65071c3a61b53725036ea8f73366a4920a481ebddaf8d0ca/soundfile-0.12.1-py2.py3-none-manylinux_2_31_x86_64.whl", hash = "sha256:074247b771a181859d2bc1f98b5ebf6d5153d2c397b86ee9e29ba602a8dfe2a6", size = 1174746, upload-time = "2023-02-15T15:37:24.771Z" },
     { url = "https://files.pythonhosted.org/packages/03/0f/49941ed8a2d94e5b36ea94346fb1d2b22e847fede902e05be4c96f26be7d/soundfile-0.12.1-py2.py3-none-win32.whl", hash = "sha256:59dfd88c79b48f441bbf6994142a19ab1de3b9bb7c12863402c2bc621e49091a", size = 888234, upload-time = "2023-02-15T15:37:27.078Z" },
     { url = "https://files.pythonhosted.org/packages/50/ff/26a4ee48d0b66625a4e4028a055b9f25bc9d7c7b2d17d21a45137621a50d/soundfile-0.12.1-py2.py3-none-win_amd64.whl", hash = "sha256:0d86924c00b62552b650ddd28af426e3ff2d4dc2e9047dae5b3d8452e0a49a77", size = 1009109, upload-time = "2023-02-15T15:37:29.41Z" },
-]
-
-[[package]]
-name = "speechrecognition"
-version = "3.10.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "requests" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/50/65/1307adaf5f29d850fc0925251f71bb5aa3d030043ac8a373e7ae6982bf29/SpeechRecognition-3.10.0.tar.gz", hash = "sha256:14131155e8a8ba00ead1b7b9b1a2fa71c845e4db5f9a5f66a33a1bd6c55c6c35", size = 32847550, upload-time = "2023-03-13T12:27:53.171Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/1f/11/843b42cb0a75b1f654b2d49f894a692ce78677ccf4a1272f7cf69bdf2c76/SpeechRecognition-3.10.0-py2.py3-none-any.whl", hash = "sha256:7ae9966887d9909ce3e5a0c27ecc3eacfca16fd0c0829f77f552919418e86306", size = 32838805, upload-time = "2023-03-13T12:27:46.432Z" },
 ]
 
 [[package]]
