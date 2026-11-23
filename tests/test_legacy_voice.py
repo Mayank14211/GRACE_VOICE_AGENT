@@ -1,4 +1,4 @@
-"""M2: the legacy main.py loop runs on grammar + registry (no substring matching)."""
+"""The legacy voice agent (was main.py) runs on grammar + registry (no substring matching)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-import main
+from grace import legacy_voice
 from grace.actions import create_fake_registry
 from grace.intent.assistant import AssistantReply
 
@@ -35,7 +35,7 @@ class FakeScreenReader:
 @pytest.fixture
 def agent():
     registry, backends = create_fake_registry()
-    a = main.GraceVoiceAgent(
+    a = legacy_voice.GraceVoiceAgent(
         registry=registry, tts=FakeTTS(), recognizer=object(), screen_reader=FakeScreenReader()
     )
     yield a, backends
@@ -56,7 +56,7 @@ def agent():
     ],
 )
 def test_strip_execute_word(raw: str, stripped: str) -> None:
-    assert main.strip_execute_word(raw) == stripped
+    assert legacy_voice.strip_execute_word(raw) == stripped
 
 
 def test_commands_go_through_registry(agent) -> None:
@@ -181,7 +181,7 @@ def conversation_agent(utterances: list[str], follow_up_s: float = 10.0):
     clock = Clock()
     rec = ScriptedRecognizer(clock, utterances)
     registry, b = create_fake_registry()
-    a = main.GraceVoiceAgent(
+    a = legacy_voice.GraceVoiceAgent(
         registry=registry,
         tts=FakeTTS(),
         recognizer=rec,
@@ -248,7 +248,7 @@ def test_waits_for_tts_before_listening(monkeypatch) -> None:
     a.tts.wait_until_done = lambda: order.append("wait")
     original = rec.listen_for_command
     rec.listen_for_command = lambda phrase_time_limit=5: (order.append("listen"), original())[1]
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    monkeypatch.setattr(legacy_voice.time, "sleep", lambda s: None)
     a._on_wake_word_detected("")
     assert order[:2] == ["wait", "listen"]
 

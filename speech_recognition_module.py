@@ -10,16 +10,8 @@ import threading
 import re
 
 
-def split_wake_word(text, wake_word):
-    """Return what was said after the wake word, or None if the wake word wasn't said.
-
-    The wake word must be a whole word ("listen", not "listening"); case is ignored.
-    "Listen, open notepad" -> "open notepad"; "listen" -> "".
-    """
-    if not text or not wake_word:
-        return None
-    m = re.search(rf"\b{re.escape(wake_word)}\b[\s,.!?:]*(?P<rest>.*)", text, re.I | re.S)
-    return m.group("rest").strip() if m else None
+# Moved to grace.input.voice in S05 (pure, no audio imports); re-exported here.
+from grace.input.voice import split_wake_word  # noqa: E402,F401
 
 
 class SpeechRecognizer:
@@ -163,6 +155,28 @@ class SpeechRecognizer:
         self.listening_thread.daemon = True
         self.listening_thread.start()
         
+    def listen_for_wake_phrase(self):
+        """One short listening pass (about 1 s if silent, up to 5 s of speech).
+
+        Returns the recognised text, or None (silence, not understood, mic or service error).
+        The microphone is closed again before this returns. Used by grace.input.voice (S05).
+        """
+        try:
+            with sr.Microphone() as source:
+                self.recognizer.adjust_for_ambient_noise(source, duration=0.1)
+                # Long enough for "listen, open notepad" in one breath.
+                audio = self.recognizer.listen(source, timeout=1, phrase_time_limit=5)
+            text = self.recognizer.recognize_google(audio)
+            print(f"Heard: {text}")
+            return text
+        except sr.UnknownValueError:
+            return None  # speech not understood, keep listening
+        except sr.RequestError:
+            time.sleep(0.5)  # STT service error (offline?), retry shortly
+            return None
+        except Exception:
+            return None  # timeout waiting for speech, mic hiccup
+
     def _wake_word_listener(self):
         """Background thread for wake word detection.
 
@@ -172,21 +186,7 @@ class SpeechRecognizer:
         print(f"Listening for wake word: '{self.wake_word}'")
 
         while not self.stop_listening:
-            text = None
-            try:
-                with sr.Microphone() as source:
-                    self.recognizer.adjust_for_ambient_noise(source, duration=0.1)
-                    # Long enough for "listen, open notepad" in one breath.
-                    audio = self.recognizer.listen(source, timeout=1, phrase_time_limit=5)
-                text = self.recognizer.recognize_google(audio)
-                print(f"Heard: {text}")
-            except sr.UnknownValueError:
-                pass  # speech not understood, keep listening
-            except sr.RequestError:
-                time.sleep(0.5)  # STT service error, retry shortly
-            except Exception:
-                pass  # timeout waiting for speech, mic hiccup
-
+            text = self.listen_for_wake_phrase()
             rest = split_wake_word(text, self.wake_word)
             if rest is not None:
                 print(f"Wake word detected: {self.wake_word}")
