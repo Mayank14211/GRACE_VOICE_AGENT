@@ -81,6 +81,7 @@ class RuntimeSettings(_Section):
 
     mic_on_at_start: bool = True
     gestures_on_at_start: bool = False  # the camera opens only while gestures are on
+    mic_button: bool = True  # on-screen microphone button next to the status chip (needs overlay)
     # Wake word for the legacy Google-STT voice loop (S06 replaces it with wakeword.model_path).
     wake_word: str = Field("listen", min_length=2)
     overlay: bool = True
