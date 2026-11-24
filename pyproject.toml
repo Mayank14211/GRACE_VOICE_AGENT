@@ -47,6 +47,11 @@ dependencies = [
     "openwakeword==0.6.0",
     # Local English STT, Small Streaming model (models/moonshine/). py3-none-win_amd64 wheel. MIT.
     "moonshine-voice==0.1.6",
+    # Imported directly, so declared directly (both were only transitive before; versions are the
+    # ones already locked): scipy for resampling in grace/input/audio.py, opencv-contrib-python
+    # (cv2) for the camera in grace/input/gestures and the doctor. mediapipe 0.10.14 requires it.
+    "scipy==1.15.3",
+    "opencv-contrib-python==4.11.0.86",
 ]
 
 [project.optional-dependencies]
@@ -79,6 +84,14 @@ markers = [
     "network: makes real network calls",
     "windows: only runs on Windows",
 ]
+
+# Editors (Pylance / Pyright) resolve imports from the project's own environment, not a global
+# Python, so numpy, soundfile, scipy ... are found. Create it with `uv sync`.
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.11"
+pythonPlatform = "Windows"
 
 [tool.ruff]
 target-version = "py311"
