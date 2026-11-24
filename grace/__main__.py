@@ -274,7 +274,12 @@ def _build_voice(
     missing) leaves GRACE running with gestures and hotkeys, and says why."""
     from grace.actions.executor import ExecutorRegistry
     from grace.core.bus import PARTIAL
-    from grace.input.voice import VoiceHooks, VoiceUnavailable, build_voice_worker
+    from grace.input.voice import (
+        VoiceHooks,
+        VoiceUnavailable,
+        build_voice_worker,
+        stt_event_fields,
+    )
     from grace.legacy_voice import GraceVoiceAgent, build_assistant
     from tts import TextToSpeech
 
@@ -305,24 +310,15 @@ def _build_voice(
         metrics.write("wake", score=None if score is None else round(score, 3))
 
     def on_stt(utt: Any, final: Any) -> None:
-        # No transcript text in metrics: dictation can be private. eval_stt measures accuracy.
-        eos_ms = (final.t_final - utt.eos_t) * 1000 if utt.eos_t else None
-        metrics.write(
-            "stt",
-            kind=utt.kind,
-            engine=final.engine,
-            fallback_from=final.fallback_from,
-            audio_s=round(final.audio_s, 2),
-            eos_to_final_ms=None if eos_ms is None else round(eos_ms, 1),
-            speech_end_to_final_ms=None if eos_ms is None else round(
-                eos_ms + utt.hangover_s * 1000, 1
-            ),
-            end=utt.end_reason,
-            partials=final.partials,
-            chars=len(final.text),
-        )  # fmt: skip
-        if eos_ms is not None:
-            log.info("stt %s: %.0f ms after end of speech (%s)", final.engine, eos_ms, utt.kind)
+        fields = stt_event_fields(utt, final)
+        metrics.write("stt", **fields)
+        if fields["eos_to_final_ms"] is not None:
+            log.info(
+                "stt %s: %.0f ms after end of speech (%s)",
+                final.engine,
+                fields["eos_to_final_ms"],
+                utt.kind,
+            )
 
     hooks = VoiceHooks(
         command=agent.handle_utterance,

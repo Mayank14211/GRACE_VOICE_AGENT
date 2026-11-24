@@ -9,8 +9,9 @@ speech → final text under 500 ms with Moonshine** (the team may revise the bar
 - **speech end → final** adds the silence GRACE waits for (≈ end_of_speech_ms): what the user
   feels. Lower `audio.end_of_speech_ms` (e.g. 350) to shorten it, at the risk of cutting long
   pauses inside a command.
-- Live runs log the same numbers per utterance to `logs/metrics/*.jsonl` (`"event": "stt"`,
-  fields `eos_to_final_ms`, `speech_end_to_final_ms`, `engine`, `audio_s`; no transcript text).
+- Live runs log the same numbers per utterance to `logs/metrics/*.jsonl` (`"kind": "stt"`,
+  fields `utterance`, `engine`, `eos_to_final_ms`, `speech_end_to_final_ms`, `audio_s`; no
+  transcript text).
 
 How to reproduce: `uv run python scripts/eval_stt.py --save` (real recordings in `tests/audio/`,
 see tests/audio/README.md) and `uv run python scripts/bench_threads.py --save`. Run on mains

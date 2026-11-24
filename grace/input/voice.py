@@ -127,6 +127,27 @@ class Utterance:
         return self.frames * FRAME_S
 
 
+def stt_event_fields(utt: Utterance, final: Final) -> dict[str, Any]:
+    """Fields of the ``stt`` metrics row. No transcript text (dictation can be private).
+
+    Never use the key ``kind``: MetricsLog.write already takes the event name as ``kind``.
+    """
+    eos_ms = (final.t_final - utt.eos_t) * 1000 if utt.eos_t else None
+    return {
+        "utterance": utt.kind,
+        "engine": final.engine,
+        "fallback_from": final.fallback_from,
+        "audio_s": round(final.audio_s, 2),
+        "eos_to_final_ms": None if eos_ms is None else round(eos_ms, 1),
+        "speech_end_to_final_ms": (
+            None if eos_ms is None else round(eos_ms + utt.hangover_s * 1000, 1)
+        ),
+        "end": utt.end_reason,
+        "partials": final.partials,
+        "chars": len(final.text),
+    }
+
+
 # --------------------------------------------------------------------------- the pipeline
 class ListenPipeline:
     """Decides what each frame and each transcript means. No threads, no hardware: the voice
@@ -386,7 +407,13 @@ class ListenPipeline:
                 return None
             text = text.strip()
             now = self._clock()
-            if utt.kind == "wake_check":
+            kind = utt.kind
+            if kind == "wake_check" and self.phase == "active":
+                # Captured while idle, but an earlier utterance (typically the wake word alone,
+                # said a moment before) has opened the window since. Transcripts arrive in order,
+                # so the phase is up to date here: this one is a command (or dictation).
+                kind = "dictation" if self._is_dictation() else "command"
+            if kind == "wake_check":
                 rest = split_wake_word(text, self.wake_word)
                 if rest is None:
                     return None
@@ -395,9 +422,9 @@ class ListenPipeline:
                 if rest:
                     self._after_command(now)
                 return rest or None
-            command = (
-                text if utt.kind == "dictation" else strip_leading_wake_word(text, self.wake_word)
-            )
+            command = text
+            if kind != "dictation":
+                command = strip_leading_wake_word(text, self.wake_word)
             if command:
                 self._after_command(now)
             return command or None
@@ -439,6 +466,14 @@ class SttWorker:
     def submit(self, utt: Utterance) -> None:
         self._jobs.put(utt)
 
+    @staticmethod
+    def _hook(fn: Callable[..., Any], *args: Any) -> None:
+        """Call a reporting hook (overlay, metrics); its failure is logged, never fatal."""
+        try:
+            fn(*args)
+        except Exception:  # noqa: BLE001
+            log.exception("voice hook %s failed", getattr(fn, "__name__", "?"))
+
     def run(self, utt: Utterance) -> None:
         pipeline = self._pipeline()
         try:
@@ -452,11 +487,11 @@ class SttWorker:
             for event in engine.transcribe_stream(utt.chunks()):
                 if isinstance(event, Partial):
                     if utt.kind != "wake_check" and pipeline.is_current(utt):
-                        self._on_partial(utt, event.text)
+                        self._hook(self._on_partial, utt, event.text)
                     continue
                 if utt.cancelled:
                     return
-                self._on_final(utt, event)
+                self._hook(self._on_final, utt, event)  # metrics: must never drop the command
                 command = pipeline.handle_final(utt, event.text)
                 if command:
                     self._on_command(utt, command)

@@ -172,6 +172,29 @@ def test_wake_word_and_command_in_one_breath() -> None:
     assert h.commands == ["open notepad", "volume 30"]
 
 
+def test_a_command_started_before_the_wake_word_transcript_arrives_is_still_a_command() -> None:
+    """Regression: "listen" ... short pause ... "volume 30". The second utterance starts while the
+    first is still being transcribed, so it is captured as a wake check; it must still run."""
+    h = Harness(["listen", "volume 30"])
+    h.feed(SPEECH, 10)
+    h.feed(SILENCE, 5)  # first utterance ends; its transcript is still pending
+    h.feed(SPEECH, 10)
+    h.feed(SILENCE, 5)  # second utterance ends too
+    assert [j.kind for j in h.jobs] == ["wake_check", "wake_check"] and h.p.phase == "idle"
+    h.run_stt()
+    assert h.commands == ["volume 30"] and h.p.phase == "active"
+
+
+def test_a_stray_second_utterance_without_the_wake_word_is_still_ignored() -> None:
+    h = Harness(["what a nice day", "volume 30"])
+    h.feed(SPEECH, 10)
+    h.feed(SILENCE, 5)
+    h.feed(SPEECH, 10)
+    h.feed(SILENCE, 5)
+    h.run_stt()
+    assert h.commands == [] and h.p.phase == "idle"
+
+
 def test_wake_word_alone_opens_the_window() -> None:
     h = Harness(["listen", "volume 30"])
     h.say()
@@ -565,3 +588,65 @@ def test_real_vad_and_moonshine_find_both_commands() -> None:
     for job in jobs:
         stt.run(job)
     assert [c.lower().strip(".") for c in commands] == ["volume up", "take a screenshot"]
+
+
+# --------------------------------------------------------------------------- metrics hooks
+def _utterance_and_final(kind: str = "command"):
+    from grace.input.stt.base import Final
+    from grace.input.voice import Utterance
+
+    utt = Utterance(kind, 0, started=1.0)  # type: ignore[arg-type]
+    utt.eos_t, utt.hangover_s, utt.end_reason = 10.0, 0.5, "silence"
+    final = Final("open notepad", "moonshine", 1.5, 8.0, 10.0, 10.12, partials=3)
+    return utt, final
+
+
+def test_stt_metrics_row_goes_through_a_real_metrics_log(tmp_path) -> None:
+    """Regression: the row used the field name ``kind``, which MetricsLog.write already takes as
+    the event name ("got multiple values for argument 'kind'"), so no voice command ever ran."""
+    import json
+
+    from grace.input.voice import stt_event_fields
+    from grace.metrics.log import MetricsLog
+
+    utt, final = _utterance_and_final()
+    fields = stt_event_fields(utt, final)
+    assert "kind" not in fields
+    log = MetricsLog(tmp_path / "s.jsonl")
+    log.write("stt", **fields)  # must not raise
+    log.close()
+    (row,) = [json.loads(line) for line in (tmp_path / "s.jsonl").read_text().splitlines()]
+    assert row["kind"] == "stt" and row["utterance"] == "command" and row["engine"] == "moonshine"
+    assert row["eos_to_final_ms"] == pytest.approx(120.0, abs=0.1)
+    assert row["speech_end_to_final_ms"] == pytest.approx(620.0, abs=0.1)
+    assert "open notepad" not in json.dumps(row)  # never the transcript
+
+
+def test_no_metrics_call_uses_the_reserved_kind_field() -> None:
+    import ast
+    from pathlib import Path
+
+    offenders = []
+    for path in (Path(__file__).resolve().parent.parent / "grace").rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "write"
+                and "metrics" in ast.unparse(node.func.value)
+                and any(k.arg == "kind" for k in node.keywords)
+            ):
+                offenders.append(f"{path.name}:{node.lineno}")
+    assert not offenders, offenders
+
+
+def test_a_failing_metrics_hook_does_not_drop_the_command() -> None:
+    h = Harness(["listen volume 30"])
+
+    def broken(utt, final) -> None:
+        raise TypeError("metrics blew up")
+
+    h.stt._on_final = broken
+    h.stt._on_partial = broken
+    h.say()
+    assert h.commands == ["volume 30"] and h.p._pending == 0
