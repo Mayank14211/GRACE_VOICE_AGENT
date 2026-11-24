@@ -99,7 +99,7 @@ def eval_set(out: Path, phrases_file: Path = ROOT / "tests" / "audio" / "phrases
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "GRACE").splitlines()[0])
     parser.add_argument("--eval-set", type=Path, default=None, metavar="DIR")
     args = parser.parse_args(argv)
     if args.eval_set is not None:

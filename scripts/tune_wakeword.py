@@ -35,7 +35,7 @@ def suggest(results: list[ThresholdResult], max_false_per_hour: float) -> Thresh
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "GRACE").splitlines()[0])
     parser.add_argument("--model", type=Path, default=Path("models/wakeword/grace.onnx"))
     parser.add_argument("--positives", type=Path, required=True)
     parser.add_argument("--negatives", type=Path, required=True)

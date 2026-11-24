@@ -87,7 +87,7 @@ def fetch_whisper(size: str, models_dir: Path = MODELS_DIR) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "GRACE").splitlines()[0])
     parser.add_argument("--demo-wakeword", action="store_true", help="also the hey_jarvis model")
     parser.add_argument("--whisper", nargs="?", const="base", default=None, metavar="SIZE",
                         help="also faster-whisper (default size: base)")  # fmt: skip

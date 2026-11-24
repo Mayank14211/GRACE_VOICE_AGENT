@@ -321,7 +321,7 @@ def markdown(reports: list[EngineReport], samples: list[Sample], label: str, set
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "GRACE").splitlines()[0])
     parser.add_argument("--audio-dir", type=Path, default=AUDIO_DIR)
     parser.add_argument("--engines", default=None, help="comma list (default: all available)")
     parser.add_argument("--fast", action="store_true", help="no real-time pacing (latency invalid)")

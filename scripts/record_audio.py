@@ -80,7 +80,7 @@ def next_index(folder: Path, prefix: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "GRACE").splitlines()[0])
     parser.add_argument("--out", type=Path, default=ROOT / "tests" / "audio")
     parser.add_argument("--prefix", required=True, help="speaker or room name, e.g. mayank")
     parser.add_argument("--phrases", type=Path, help="one phrase per line: record each once")

@@ -105,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv[:1] == ["--child"]:
         print(json.dumps(child(argv[1], int(argv[2]), argv[3:])))
         return 0
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "GRACE").splitlines()[0])
     parser.add_argument("--threads", default="4,6,8", help="comma list, each 1-8")
     parser.add_argument("--audio-dir", type=Path, default=None)
     parser.add_argument("--limit", type=int, default=20, help="recordings per configuration")
