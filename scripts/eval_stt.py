@@ -214,7 +214,7 @@ def replay(
         out.error = why
 
     pipe_ref: list[ListenPipeline] = []
-    stt = SttWorker(lambda d: engine, lambda: pipe_ref[0], on_final=on_final,
+    stt = SttWorker(lambda _dictation: engine, lambda: pipe_ref[0], on_final=on_final,
                     on_unavailable=on_problem)  # fmt: skip
     a = settings.audio
     pipe = ListenPipeline(
