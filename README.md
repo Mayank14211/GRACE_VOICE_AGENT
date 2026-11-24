@@ -4,11 +4,11 @@ GRACE (General-purpose Responsive Assistant for Computer Environment) is an AI-p
 
 ## Features
 
-- **Speech-to-Text (STT)**: Convert your voice to text for hands-free typing
+- **Speech-to-Text (STT)**: offline and streaming (Moonshine), with live partial text on screen
 - **System Control**: Open applications, control windows, perform clicks, and more
 - **Screen Reading**: Read and understand text on the screen
 - **Code Analysis**: Analyze and debug code with AI assistance
-- **Wake Word Detection**: Activate with customizable wake word (default: "listen")
+- **Wake Word Detection**: a custom openWakeWord model (offline), or a spoken word until it exists
 - **Dictation Mode**: Type continuously using voice
 
 > Project plan and roadmap: [docs/PLAN.md](docs/PLAN.md) (source of truth).
@@ -31,7 +31,8 @@ GRACE (General-purpose Responsive Assistant for Computer Environment) is an AI-p
 - Windows 10/11, 64-bit
 - Python 3.11 (64-bit) — managed by [uv](https://docs.astral.sh/uv/)
 - Microphone and webcam
-- Internet connection (the legacy speech recognition uses Google web STT)
+- No internet needed for voice: wake word, English speech-to-text and fixed commands run offline
+  (the Gemini assistant and the optional Groq STT need a network)
 - Tesseract OCR (for screen reading)
 
 ## Installation
@@ -52,7 +53,14 @@ uv sync
 (`uv export --format requirements-txt --no-dev --no-hashes --no-emit-project -o requirements.txt`);
 do not edit it by hand.
 
-3. Check the environment (opens the mic and camera briefly; add `--no-hardware` to skip them):
+3. Download the voice models (about 150 MB, into `models/`, hash-checked; once per machine):
+```powershell
+uv run python scripts/fetch_models.py               # Silero VAD, wake-word features, Moonshine
+uv sync --extra stt-whisper                         # optional: Hindi / accurate dictation offline
+uv run python scripts/fetch_models.py --whisper     # ...and its faster-whisper model
+```
+
+   Check the environment (opens the mic and camera briefly; add `--no-hardware` to skip them):
 ```powershell
 uv run python -m grace doctor        # scripts/doctor.py still works too
 ```
@@ -108,6 +116,16 @@ uv run python -m grace --no-voice    # gestures + hotkeys only
 | `Ctrl+Alt+H` | Show / hide the conversation history panel |
 | `Ctrl+Alt+X` | Mark the last action as wrong (written to `logs/metrics/`) |
 
+A round microphone button sits left of the status chip: click it to switch the mic on or off
+(green = on, red slash = off, amber ring = listening for a command: after the wake word, or
+while push-to-talk is held). It does the same as `Ctrl+Alt+M`
+and never takes keyboard focus, so the app you are typing in stays in front. Turn it off with
+`runtime.mic_button: false`.
+
+Left of it a round camera button switches gesture control (and the camera) on or off, like
+`Ctrl+Alt+G`; a red ring means the camera could not be opened. Turn it off with
+`runtime.gesture_button: false`.
+
 Every hotkey can be changed in the `hotkeys:` section of `settings.yaml`; start-up toggles, the
 wake word and the overlay are in `runtime:`. A short tone confirms each toggle.
 
@@ -137,12 +155,41 @@ uv run python -m grace.input.gestures             # live: mouse, scroll, volume,
 Every pose and threshold is in the `gestures:` section of `settings.yaml`. Record landmark
 fixtures for the tests with `uv run python scripts/record_gestures.py --hand right`.
 
-You can customize the wake word (API keys are never passed on the command line; see
-[Configuration](#configuration)):
+### Voice
+
+One microphone stream feeds everything. Silero VAD finds where each utterance starts and ends,
+and the transcript streams onto the subtitle bar *while you speak* (in italics; the final text
+replaces it). The mic is only open while it is on (`Ctrl+Alt+M`) or push-to-talk is held.
+
+| How you start a command | When |
+|---|---|
+| Say the **wake word** (a short tone answers), then the command | default |
+| Hold **`Ctrl+Alt+Space`**, speak, release | always, even with the mic off; no wake word |
+| Just speak | `wakeword.enabled: false` (every utterance is a command while the mic is on) |
+
+The wake word is the team's own openWakeWord model (`models/wakeword/grace.onnx`; train it
+with [docs/wakeword.md](docs/wakeword.md)). Until that file exists, GRACE uses a spoken word
+instead: start with `runtime.wake_word` ("listen, open notepad"). Change that word without
+editing settings:
 
 ```bash
 uv run python -m grace --wake-word "computer"
 uv run python -m grace --settings my-settings.yaml --env-file my.env
+```
+
+Speech-to-text (`stt:` in `settings.yaml`): English uses **Moonshine Small Streaming** offline
+(final text ~0.1 s after you stop). `language: hi` / `auto`, or dictation with
+`stt.dictation_accurate: true`, use **Groq** `whisper-large-v3-turbo` when `GROQ_API_KEY` is set
+and the network answers, otherwise **faster-whisper** (extra `stt-whisper`). If Groq fails, the
+same utterance is transcribed locally instead and Groq is skipped for a minute.
+
+Measure accuracy and latency on your own voice (results go to
+[docs/results/stt.md](docs/results/stt.md)):
+
+```bash
+uv run python scripts/record_audio.py --phrases tests/audio/phrases.txt --prefix <name>
+uv run python scripts/eval_stt.py --save       # WER, intent accuracy, end-of-speech latency
+uv run python scripts/bench_threads.py --save  # fastest inference.threads (4 / 6 / 8)
 ```
 
 List available voices:
@@ -162,7 +209,7 @@ understand.
 World!", "close this window". You can also say the command in the same breath as the wake word
 ("listen, open notepad"). GRACE keeps listening until you pause for `wakeword.follow_up_s` seconds
 (default 10; `0` = wake word before every command), or until you say "stop listening" / "that's
-all". It waits until it has finished speaking before it listens, so it doesn't hear itself.
+all". While GRACE is talking the mic is ignored, so it doesn't hear itself.
 
 - **Volume and brightness** (exact values, 0-100; out-of-range values are clamped):
   - "Volume 40" / "Set the volume to 70 percent" / "Volume max"
@@ -311,7 +358,11 @@ GRACE reads two files from the repository root. Both are git-ignored and both ar
 
 GRACE Voice Agent is built with a modular architecture consisting of:
 
-1. **Speech Recognition Module**: Handles wake word detection and speech-to-text
+1. **Voice input** (`grace/input/`): `audio.py` (one sounddevice stream, Silero VAD, utterance
+   segmenter), `wakeword.py` (openWakeWord), `stt/` (Moonshine, faster-whisper, Groq behind one
+   `transcribe_stream` interface) and `voice.py` (wake word, follow-ups, push-to-talk, dictation;
+   voice, STT and intent threads). `grace/legacy_voice.py` turns each final transcript into
+   commands and replies
 2. **Text-to-Speech Module**: Provides voice output
 3. **Command grammar** (`grace/intent/grammar.py`): turns a whole utterance into an Intent; no
    keyword-contains matching
@@ -320,8 +371,8 @@ GRACE Voice Agent is built with a modular architecture consisting of:
    through the confirmation gate (`grace/actions/confirmation.py`)
 5. **Screen Reader Module**: Captures and analyzes screen content
 6. **Runtime** (`grace/__main__.py`, `grace/runtime.py`): Qt owns the main thread (overlay,
-   `grace/ui/overlay.py`); the voice worker (`grace/input/voice.py`, wrapping the legacy agent in
-   `grace/legacy_voice.py`), the gesture camera loop, the action executor and the keyboard hook
+   `grace/ui/overlay.py`); the voice, STT and intent threads (`grace/input/voice.py`), the
+   gesture camera loop, the action executor and the keyboard hook
    (`grace/input/hotkeys.py`) each run on their own thread and talk through the event bus
    (`grace/core/bus.py`) and shared state (`grace/core/state.py`). Every OS action, from voice
    or gesture, runs on the one executor thread, in order.
@@ -343,7 +394,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Acknowledgments
 
-- OpenAI for Whisper API
+- Moonshine Voice (Useful Sensors), openWakeWord, Silero VAD and faster-whisper
 - Google for Gemini AI API
 - Tesseract OCR project
 - All the open-source libraries used in this project 

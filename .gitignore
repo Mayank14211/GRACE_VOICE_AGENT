@@ -25,3 +25,4 @@ logs/
 .idea/
 Thumbs.db
 tempCodeRunnerFile*.py
+data/

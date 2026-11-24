@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from grace import doctor
+from grace import doctor, models
 
 # Assembled at runtime so tests/test_no_secrets.py does not flag this file.
 SECRET = "sk" + "-THIS-MUST-NEVER-BE-PRINTED-1234567890"
@@ -78,8 +78,45 @@ def test_unbuilt_features_are_not_configured() -> None:
     assert all(r.status == doctor.NOT_CONFIGURED for r in doctor.check_not_built())
 
 
+@pytest.mark.skipif(bool(models.missing()), reason="run scripts/fetch_models.py")
 def test_doctor_no_hardware_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
     assert doctor.main(["--no-hardware"]) == 0, capsys.readouterr().out
+
+
+def test_doctor_checks_every_required_model_and_the_voice_stack() -> None:
+    from grace.models import MODEL_FILES, REQUIRED_GROUPS
+
+    assert len(doctor.MODELS) == sum(f.group in REQUIRED_GROUPS for f in MODEL_FILES)
+    names = {module for module, _, _ in doctor.IMPORTS}
+    assert {"onnxruntime", "openwakeword", "moonshine_voice", "grace.input.voice"} <= names
+    assert not {"speech_recognition", "pyaudio"} & names  # removed in M5
+    assert (
+        doctor._short(
+            "moonshine/download.moonshine.ai/model/small-streaming-en/quantized_26_11_02/encoder.ort"
+        )
+        == "moonshine/small-streaming-en/encoder.ort"
+    )
+
+
+def test_wakeword_check_without_a_model_is_not_configured(tmp_path: Path) -> None:
+    (tmp_path / "s.yaml").write_text("wakeword: {model_path: nowhere/grace.onnx}\n")
+    result = doctor.check_wakeword(tmp_path / "s.yaml", tmp_path / ".env")
+    assert result.status == doctor.NOT_CONFIGURED and "listen" in result.detail
+    (tmp_path / "s.yaml").write_text("wakeword: {enabled: false}\n")
+    assert doctor.check_wakeword(tmp_path / "s.yaml", tmp_path / ".env").status == (
+        doctor.NOT_CONFIGURED
+    )
+
+
+def test_onnxruntime_check_passes() -> None:
+    result = doctor.check_onnxruntime()
+    assert result.status == doctor.PASS, result.detail
+
+
+def test_stt_check_reports_optional_engines(tmp_path: Path) -> None:
+    results = {r.name: r for r in doctor.check_stt(tmp_path / "none.yaml", tmp_path / ".env")}
+    assert results["stt groq"].status == doctor.NOT_CONFIGURED
+    assert results["stt faster-whisper"].status in {doctor.PASS, doctor.WARN, doctor.NOT_CONFIGURED}
 
 
 @pytest.mark.hardware

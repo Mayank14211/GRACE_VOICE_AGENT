@@ -1,8 +1,8 @@
-"""Legacy voice agent (old Google web STT + pyttsx3), run inside the S05 runtime.
+"""Voice agent: what GRACE does with a transcribed utterance (grammar, Gemini, TTS replies).
 
-Moved here from main.py in S05; ``grace.input.voice.VoiceWorker`` owns its lifecycle (wake-word
-passes, push-to-talk, mic on/off). S06 replaces the STT path (sounddevice + VAD + wake word +
-local STT) and this module goes away.
+Moved here from main.py in S05. Since S06 it no longer listens: grace/input/voice.py owns the
+microphone, wake word, follow-up window and push-to-talk, and calls ``handle_utterance`` on the
+intent thread with each final transcript. S07 replaces the Gemini-only fallback with the router.
 
 Every command goes through grace.intent.grammar (whole-phrase grammar) and the action registry.
 In the runtime the registry is an ``ExecutorRegistry``, so voice actions run on the same executor
@@ -51,8 +51,8 @@ HELP_TEXT = (
     "  (these ask for confirmation: say yes or press Ctrl+Alt+Y within 8 seconds)\n"
     "- Anything else goes to Gemini (needs GEMINI_API_KEY): questions, 'search the web for ...',\n"
     "  'generate an image of ...', or several steps at once ('mute and open youtube')\n"
-    "- After the wake word, keep talking: follow-up commands need no wake word until you pause.\n"
-    "  'Stop listening' ends it; 'start over' makes Gemini forget the conversation.\n"
+    "- After the wake word (a short tone), keep talking: follow-up commands need no wake word\n"
+    "  until you pause. 'Stop listening' ends it; 'start over' makes Gemini forget.\n"
     "- Hold Ctrl+Alt+Space to talk without the wake word. Ctrl+Alt+M mic, Ctrl+Alt+G gestures,\n"
     "  Ctrl+Alt+Q stops everything.\n"
     "- Exit / quit / help"
@@ -82,41 +82,30 @@ class GraceVoiceAgent:
         registry: Any = None,
         grammar: Grammar | None = None,
         tts: Any = None,
-        recognizer: Any = None,
         screen_reader: Any = None,
         assistant: Any = None,
         wake_word: str = "listen",
-        follow_up_s: float = 10.0,
-        clock: Callable[[], float] = time.monotonic,
         on_heard: Callable[[str], None] = _noop,
         on_reply: Callable[[str], None] = _noop,
-        on_listening: Callable[[bool], None] = _noop,
         on_mode: Callable[[str], None] = _noop,
+        on_end_session: Callable[[], None] = _noop,
         on_exit: Callable[[], None] | None = None,
-        may_listen: Callable[[], bool] = lambda: True,
     ) -> None:
-        """Hardware-backed parts (tts, recognizer, screen_reader, registry) can be injected; tests
-        pass fakes. Anything not injected is created for real. ``assistant`` (GeminiAssistant)
-        answers whatever the grammar doesn't match; None disables that.
-
-        ``may_listen`` is asked before and after every listen: False (mic turned off, panic stop)
-        ends the conversation and drops what was heard.
+        """Hardware-backed parts (tts, screen_reader, registry) can be injected; tests pass fakes.
+        Anything not injected is created for real. ``assistant`` (GeminiAssistant) answers
+        whatever the grammar doesn't match; None disables that. ``on_end_session`` is called for
+        "stop listening" (the voice pipeline closes its follow-up window).
         """
         if tts is None:
             from tts import TextToSpeech
 
             tts = TextToSpeech()
-        if recognizer is None:
-            from speech_recognition_module import SpeechRecognizer
-
-            recognizer = SpeechRecognizer(api="google")
         if screen_reader is None:
             from screen_reader import ScreenReader
 
             # OCR only: its old Gemini path (google-generativeai, 'gemini-pro') no longer works.
             screen_reader = ScreenReader(gemini_api_key=None)
         self.tts = tts
-        self.recognizer = recognizer
         self.screen_reader = screen_reader
 
         self.grammar = grammar or default_grammar()
@@ -125,19 +114,16 @@ class GraceVoiceAgent:
         self.gate = ConfirmationGate(self.registry, say=self._say, confirm_hotkey=confirm_hotkey)
         self.dispatcher = Dispatcher(self.registry, self.gate, say=self._say)
         self.assistant = assistant
-        self.follow_up_s = follow_up_s
-        self._clock = clock
-        self._session_open = False
         self._on_heard = on_heard
         self._on_reply = on_reply
-        self._on_listening = on_listening
         self._on_mode = on_mode
+        self._on_end_session = on_end_session
         self._on_exit = on_exit
-        self.may_listen = may_listen
 
         self.wake_word = wake_word.lower()
-        self.is_running = False
+        self.is_running = True
         self.mode = "command"  # "command" or "dictation"
+        self._dictated = False  # something was typed since dictation started
         self.command_history: list[str] = []
 
         # App-level intents (they don't touch the OS themselves); everything else -> dispatcher.
@@ -165,64 +151,10 @@ class GraceVoiceAgent:
         self.mode = mode
         self._on_mode(mode)
 
-    # -- listening ------------------------------------------------------------------------------
-    def _on_wake_word_detected(self, rest: str = "") -> None:
-        """Wake word heard: run a conversation. ``rest`` is anything said in the same breath
-        ("listen, open notepad")."""
-        print(f"Wake word '{self.wake_word}' detected!")
-        self._conversation(rest)
-
-    def _listen(self, phrase_time_limit: int) -> str:
-        """Listen once, after GRACE has finished speaking (so it doesn't hear itself)."""
-        wait = getattr(self.tts, "wait_until_done", None)
-        if wait is not None:
-            wait()
-            time.sleep(0.15)  # let the speaker's tail die away
-        self._on_listening(True)
-        try:
-            return self.recognizer.listen_for_command(phrase_time_limit=phrase_time_limit) or ""
-        finally:
-            self._on_listening(False)
-
-    def _phrase_limit(self) -> int:
-        return 10 if self.mode == "dictation" else 6
-
-    def _conversation(self, first: str = "") -> None:
-        """Handle commands until ``follow_up_s`` passes with nothing said, or "stop listening".
-
-        No wake word is needed between follow-ups ("open notepad", "type Hello", "close this
-        window"). follow_up_s=0 restores one command per wake word. Dictation mode keeps the
-        conversation open until "stop dictation". Mic off / panic (``may_listen``) ends it.
-        """
-        self._session_open = True
-        pending = strip_execute_word(first)
-        if not pending:
-            self.tts.speak_async("Yes?")
-        last_heard = self._clock()
-        while self.is_running and self._session_open and self.may_listen():
-            if pending:
-                text, pending = pending, ""
-            else:
-                text = self._listen(self._phrase_limit())
-                if not self.may_listen():
-                    break  # mic went off while listening: drop what was heard
-            if not strip_execute_word(text):
-                if self.mode != "dictation" and self._clock() - last_heard >= self.follow_up_s:
-                    break
-                continue
-            last_heard = self._clock()
-            self._handle_text(text)
-            if self.follow_up_s <= 0 and self.mode != "dictation":
-                break
-        self._session_open = False
-        if self.is_running:
-            print(f"Conversation ended. Say '{self.wake_word}' to start again.")
-
-    def push_to_talk(self, heard: str | None = None) -> None:
-        """One command without the wake word (push-to-talk). ``heard`` = text already captured
-        while the key went down; otherwise listen once now."""
-        text = heard if heard else self._listen(self._phrase_limit())
-        if not self.may_listen() or not strip_execute_word(text):
+    # -- input --------------------------------------------------------------------------------
+    def handle_utterance(self, text: str) -> None:
+        """One final transcript from the voice pipeline (intent thread)."""
+        if not self.is_running or not strip_execute_word(text):
             return
         self._handle_text(text)
 
@@ -235,7 +167,7 @@ class GraceVoiceAgent:
             self._process_command(text)
 
     def _end_session(self) -> None:
-        self._session_open = False
+        self._on_end_session()
         self._say("Okay. Say the wake word when you need me.")
 
     def _reset_conversation(self) -> None:
@@ -280,23 +212,36 @@ class GraceVoiceAgent:
         return self.dispatcher.handle(intent)
 
     def _process_dictation(self, text: str) -> None:
-        """Dictation mode: type everything until the whole phrase "stop dictation"."""
+        """Dictation mode: type each finished sentence until the whole phrase "stop dictation".
+
+        Sentences after the first get a leading space so they don't run together.
+        """
         intent = self.grammar.parse(text)
         if intent is not None and intent.name == "app.dictation_stop":
             self._handle_stop_dictation()
             return
-        result = self.registry.execute("input.type", {"text": text})
-        if not result.ok:
+        typed = f" {text}" if self._dictated else text
+        result = self.registry.execute("input.type", {"text": typed})
+        if result.ok:
+            self._dictated = True
+        else:
             self._say(result.message)
 
     # -- app-level handlers ---------------------------------------------------------------------
     def _handle_dictate_command(self) -> None:
+        self._dictated = False
         self._set_mode("dictation")
         self._say("Starting dictation mode. Say 'stop dictation' when you're done.")
 
     def _handle_stop_dictation(self) -> None:
         self._set_mode("command")
         self._say("Dictation mode stopped")
+
+    def cancel_dictation(self) -> None:
+        """The mic was turned off (or panic) during dictation: leave dictation mode quietly."""
+        if self.mode == "dictation":
+            self._set_mode("command")
+            print("Dictation stopped (mic off).")
 
     def _selected_text(self) -> str:
         result = self.registry.execute("clipboard.copy")

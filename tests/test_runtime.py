@@ -246,3 +246,28 @@ def test_hotkeys_end_to_end_with_a_fake_keyboard(h: Harness) -> None:
     assert snap.history_visible and not snap.mic_on and not snap.gesture_on
     assert h.gestures.enabled == [True, False]
     assert h.voice.calls[:4] == ["cancel", "wake", "ptt", "release"]
+
+
+def test_toggle_source_is_recorded(h: Harness) -> None:
+    h.rt.toggle_mic(1.0)  # hotkey is the default route
+    h.rt.toggle_mic(2.0, source="button")
+    h.rt.toggle_gestures(3.0, source="voice")
+    rows = [r for r in h.rows() if r["kind"] == "toggle"]
+    assert [(r["what"], r["source"]) for r in rows] == [
+        ("mic", "hotkey"),
+        ("mic", "button"),
+        ("gestures", "voice"),
+    ]
+
+
+def test_button_click_path_matches_the_hotkey_path(h: Harness) -> None:
+    """Same state change, same voice calls, same earcon, whichever route the user took."""
+    h.rt.handlers()["mic_toggle"](1.0)
+    via_hotkey = (h.state.mic_on, list(h.voice.calls), list(h.earcons.played))
+    h.voice.calls.clear()
+    h.earcons.played.clear()
+    h.rt.set_mic(True, 2.0)  # back on
+    h.voice.calls.clear()
+    h.earcons.played.clear()
+    h.rt.toggle_mic(3.0, source="button")
+    assert (h.state.mic_on, h.voice.calls, h.earcons.played) == via_hotkey

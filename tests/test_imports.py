@@ -23,7 +23,7 @@ def fresh_import(name: str) -> ModuleType:
 
 @pytest.mark.parametrize(
     "module",
-    ["tts", "speech_recognition_module", "screen_reader", "tesseract_check"],
+    ["tts", "screen_reader", "tesseract_check"],
 )
 def test_legacy_module_imports(module: str) -> None:
     assert fresh_import(module) is not None

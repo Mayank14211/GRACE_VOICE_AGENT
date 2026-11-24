@@ -1,0 +1,44 @@
+# GRACE STT test set: one command per line (scripts/record_audio.py --phrases this file).
+# Each team member records all of them once. Lines starting with # are skipped.
+open notepad
+open youtube
+go to github dot com
+volume 40
+set the volume to 70 percent
+volume up
+a bit louder
+mute
+unmute
+brightness 60
+brightness down a lot
+dim the screen
+what is the brightness
+click
+double click
+right click
+scroll down
+scroll up a lot
+scroll down 5
+type hello world
+start dictation
+stop dictation
+press enter
+press control plus c
+copy
+paste
+undo
+save
+select all
+close this window
+close tab
+minimize
+maximize
+switch window
+show desktop
+take a screenshot
+read the screen
+read the selection
+stop listening
+what is the capital of France
+shut down the computer
+help

@@ -296,3 +296,35 @@ def test_follow_up_and_gemini_settings(tmp_path: Path) -> None:
         good.write_text(bad + "\n")
         with pytest.raises(ConfigError):
             load_settings(good, tmp_path / ".env", environ={})
+
+
+def test_audio_wakeword_and_stt_settings(tmp_path: Path) -> None:
+    s = Settings()
+    assert (s.audio.max_utterance_s, s.audio.dictation_max_s) == (12.0, 30.0)
+    assert (s.wakeword.patience, s.stt.engine, s.stt.moonshine_model) == (
+        2,
+        "auto",
+        "small-streaming",
+    )
+    good = tmp_path / "settings.yaml"
+    good.write_text(
+        "audio: {dictation_max_s: 20, end_of_speech_ms: 350}\n"
+        "stt: {engine: whisper_local, whisper_model: tiny, dictation_accurate: true}\n"
+    )
+    s = load_settings(good, tmp_path / ".env", environ={})
+    assert (s.audio.dictation_max_s, s.audio.end_of_speech_ms) == (20, 350)
+    assert (s.stt.engine, s.stt.whisper_model, s.stt.dictation_accurate) == (
+        "whisper_local",
+        "tiny",
+        True,
+    )
+    for bad in (
+        "stt: {engine: google}",
+        "stt: {moonshine_model: base}",
+        "stt: {update_interval_s: 0}",
+        "wakeword: {patience: 0}",
+        "audio: {dictation_max_s: 0}",
+    ):
+        good.write_text(bad + "\n")
+        with pytest.raises(ConfigError):
+            load_settings(good, tmp_path / ".env", environ={})
