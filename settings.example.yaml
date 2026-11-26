@@ -9,8 +9,8 @@
 # Speech language. en = English (offline STT). hi / auto need a cloud or Whisper STT (Phase 2).
 language: en
 
-# Demo mode pins the LLM router to the local llama-server only (no cloud calls, predictable latency)
-# and warms the model up at start. Start llama-server first: scripts/run_llama_server.ps1
+# Demo mode (S10). It does not change the LLM router: the router is cloud-only (Groq, Gemini,
+# OpenRouter); fixed commands, gestures and hotkeys work without network either way.
 demo_mode: false
 
 # Global hotkeys (the PRIMARY toggles; voice equivalents are never relied on).
@@ -39,7 +39,7 @@ runtime:
   cpu_sample_s: 60.0          # how often CPU use is logged
 
 inference:
-  # CPU threads for local models (STT, llama-server). 1-8.
+  # CPU threads for local models (speech to text). 1-8.
   # 4 on the Intel i5-12450H (P-cores only), 6 on the AMD Ryzen 5 5500U.
   # Never use the logical-thread count (12). Benchmark with scripts/bench_threads.py.
   threads: 4
@@ -120,11 +120,11 @@ gestures:
 
 router:
   # The LLM fallback for whatever the fixed commands and follow-ups don't match.
-  # Providers: groq, gemini, openrouter (need a key in .env), local (llama-server).
-  # A provider without its key is skipped automatically. Fixed commands never call an LLM.
-  provider_order: [groq, gemini, openrouter, local]
-  cloud_timeout_s: 3.0    # per-request timeout for cloud providers
-  local_timeout_s: 15.0   # per-request timeout for the local llama-server
+  # Cloud only (2026-11-26): groq first, then gemini, then openrouter. A provider without its
+  # key in .env is skipped. Fixed commands never call an LLM. The router keeps the conversation
+  # itself and sends it on every call, so any provider can take over mid-conversation.
+  provider_order: [groq, gemini, openrouter]
+  cloud_timeout_s: 3.0    # per-request timeout (each provider can override it below)
   max_retries: 1          # retries on network errors / 5xx (0-3); never on 429 or timeouts
   cooldown_s: 60.0        # after an HTTP 429, timeout or error, skip that provider for this long
   history_turns: 6        # user + GRACE exchanges sent as context (0 = no memory)
@@ -132,8 +132,7 @@ router:
   followup_s: 120.0       # "a bit more" / "undo that" refer to the last action for this long
   max_tokens: 300         # longest reply the model may write
   temperature: 0.2        # lower = more predictable tool choice
-  allow_risky: false      # true = the LLM may propose shutdown / restart / sleep (always asks to
-                          # confirm). false = those need the exact phrase ("shut down the computer")
+  analysis_timeout_s: 15.0  # "analyze this code" (never sent to Gemini: screen text stays away)
   # Model IDs change: re-check them in each provider's docs (dates in grace/config.py).
   groq:
     base_url: https://api.groq.com/openai/v1
@@ -150,26 +149,42 @@ router:
     model: google/gemma-4-26b-a4b-it:free  # must be a ":free" model (zero running cost)
     reasoning_effort: null
     timeout_s: null
-  local:
-    enabled: false        # true once llama-server runs (scripts/run_llama_server.ps1); demo_mode
-                          # turns it on as well
-    base_url: http://127.0.0.1:8080/v1
-    model: gemma-4-e4b-it # llama-server serves one model; the name is informational
-    gguf: models/llm/google_gemma-4-E4B-it-Q4_K_M.gguf  # fetch_models.py --llm downloads it
-    ctx_size: 8192        # context window (tokens)
-    binary: null          # path to llama-server.exe; null = PATH (winget install ggml.llamacpp)
-                          # or tools/llama.cpp/
+  # Free-tier limits per provider (for its model above). GRACE warns at 80 % and skips the
+  # provider at 100 % until the minute / UTC day resets. null = not limited by GRACE.
+  # Counts survive restarts (logs/quota.json).
+  quota:
+    groq:        # console.groq.com/settings/limits shows your own limits
+      rpm: 30
+      rpd: 1000
+      tpm: 8000
+      tpd: 200000
+    gemini:      # per project, visible only in AI Studio: fill these in from there
+      rpm: null
+      rpd: null
+      tpm: null
+      tpd: null
+    openrouter:  # :free models: 20 per minute, 50 per day without bought credits
+      rpm: 20
+      rpd: 50
+      tpm: null
+      tpd: null
 
-gemini:
-  # Gemini extras over the Interactions API (needs GEMINI_API_KEY): code analysis ("analyze this
-  # code", free tier), "search the web for ..." and "generate an image of ..." (both need a key
-  # from a BILLING-ENABLED project: there is no free quota). Conversation goes through the
-  # router (router.gemini above). Off in demo mode.
-  model: gemini-3.5-flash-lite          # code analysis + web search answers
-  image_model: gemini-3.1-flash-image   # "Nano Banana 2"; images saved to Pictures/GRACE
-  web_search: true                      # Google Search grounding
-  image_generation: true
-  thinking_level: low                   # minimal | low | medium | high (higher = slower)
-  timeout_s: 20.0                       # per request
-  image_timeout_s: 90.0                 # image generation is slower
-  memory_reset_s: 600.0                 # unused since S07 (see router.memory_reset_s)
+images:
+  # "Draw a picture of ..." -> Cloudflare Workers AI FLUX.1 [schnell], run by GRACE's own code.
+  # Needs CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN (Workers AI permission) in .env.
+  # Free: 10,000 neurons a day (00:00 UTC reset); one image at 4 steps counts ~58 neurons.
+  # Prompts asking for sexual content, gore, self-harm or hate are refused on this machine.
+  enabled: true
+  model: "@cf/black-forest-labs/flux-1-schnell"
+  steps: 4                # 1-8: more steps = more detail, more neurons
+  timeout_s: 30.0
+  neurons_per_day: 10000  # the free allowance; 0 = no limit
+
+search:
+  # "Search the web for ..." -> Tavily (docs/results/search.md), run by GRACE's own code.
+  # Needs TAVILY_API_KEY in .env. Free: 1,000 credits a month, no card; 1 credit per search.
+  # Only the query is sent: never screen text or the conversation.
+  enabled: true
+  max_results: 3
+  timeout_s: 8.0
+  credits_per_month: 1000  # the free allowance; 0 = no limit

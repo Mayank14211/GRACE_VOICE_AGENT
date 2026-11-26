@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -52,9 +53,8 @@ def test_defaults_without_any_files(tmp_path: Path) -> None:
     assert s.hotkeys.confirm == "ctrl+alt+y"
     assert s.hotkeys.history == "ctrl+alt+h"
     assert s.hotkeys.mark_wrong == "ctrl+alt+x"
-    assert s.router.provider_order == ["groq", "gemini", "openrouter", "local"]
+    assert s.router.provider_order == ["groq", "gemini", "openrouter"]
     assert s.router.cloud_timeout_s == 3.0
-    assert s.router.local_timeout_s == 15.0
     assert s.router.cooldown_s == 60.0
     assert s.gestures.hold_frames == 4
     assert s.wakeword.model_path == Path("models/wakeword/grace.onnx")
@@ -84,7 +84,7 @@ def test_env_example_lists_every_key_empty() -> None:
     from dotenv import dotenv_values
 
     values = dotenv_values(ROOT / ".env.example")
-    assert set(values) == set(config.ENV_KEYS.values())
+    assert set(values) == set(config.ALL_ENV_KEYS.values())
     assert all(v == "" for v in values.values())
 
 
@@ -98,8 +98,7 @@ def test_partial_yaml_overrides_merge_with_defaults(tmp_path: Path) -> None:
 inference: {threads: 6}
 hotkeys: {mic_toggle: "Ctrl + Shift + M"}
 router:
-  provider_order: [gemini, local]
-  local: {enabled: true}
+  provider_order: [gemini, groq]
 gestures: {hold_frames: 6}
 language: auto
 """,
@@ -107,9 +106,7 @@ language: auto
     assert s.inference.threads == 6
     assert s.hotkeys.mic_toggle == "ctrl+shift+m"  # normalised
     assert s.hotkeys.gesture_toggle == "ctrl+alt+g"  # untouched default
-    assert s.router.provider_order == ["gemini", "local"]
-    assert s.router.local.enabled is True
-    assert s.router.local.base_url == "http://127.0.0.1:8080/v1"
+    assert s.router.provider_order == ["gemini", "groq"]
     assert s.gestures.hold_frames == 6
     assert s.gestures.deadzone == 0.05
     assert s.language == "auto"
@@ -123,15 +120,10 @@ def test_gesture_map_defaults_and_partial_override(tmp_path: Path) -> None:
     assert s.gestures.map["index_up"] == "cursor"  # left out -> default kept
 
 
-def test_demo_mode_pins_local(tmp_path: Path) -> None:
-    s = load(
-        tmp_path,
-        "demo_mode: true\nrouter: {local: {enabled: true}}\n",
-        f"GROQ_API_KEY={FAKE_GROQ}\n",
-    )
-    assert s.provider_order() == ["local"]
-    assert s.enabled_providers() == ["local"]
-    assert status(s)["groq"].reason == "demo_mode pins [local]"
+def test_demo_mode_does_not_pin_the_router(tmp_path: Path) -> None:
+    s = load(tmp_path, "demo_mode: true\n", f"GROQ_API_KEY={FAKE_GROQ}\n")
+    assert s.provider_order() == ["groq", "gemini", "openrouter"]
+    assert s.enabled_providers() == ["groq"]
 
 
 @pytest.mark.parametrize(
@@ -188,7 +180,7 @@ def test_missing_keys_disable_cloud_providers_without_crashing(tmp_path: Path) -
         assert st[provider].enabled is False
         assert var in st[provider].reason
         assert s.api_key(provider) is None
-    assert st["local"].enabled is False
+    assert set(st) == {"groq", "gemini", "openrouter"}  # no local LLM
     assert s.enabled_providers() == []
 
 
@@ -215,10 +207,10 @@ def test_provider_not_in_order_is_disabled_even_with_key(tmp_path: Path) -> None
 def test_enabled_providers_follow_configured_order(tmp_path: Path) -> None:
     s = load(
         tmp_path,
-        "router: {provider_order: [local, gemini, groq], local: {enabled: true}}",
+        "router: {provider_order: [gemini, groq]}",
         f"GROQ_API_KEY={FAKE_GROQ}\nGEMINI_API_KEY={FAKE_GEMINI}\n",
     )
-    assert s.enabled_providers() == ["local", "gemini", "groq"]
+    assert s.enabled_providers() == ["gemini", "groq"]
 
 
 def test_keys_never_appear_in_repr_dump_or_json(tmp_path: Path) -> None:
@@ -254,7 +246,7 @@ def test_report_logs_each_disabled_provider_once(
         config.report_providers(s)
         config.report_providers(s)
     assert caplog.messages == first, "repeat reports must be silent"
-    for provider in ("groq", "gemini", "openrouter", "local"):
+    for provider in ("groq", "gemini", "openrouter"):
         assert sum(f"provider {provider}: disabled" in m for m in first) == 1
     assert any("no LLM provider enabled" in m for m in first)
 
@@ -272,30 +264,13 @@ def test_format_provider_report(tmp_path: Path) -> None:
     assert "groq" in text and "disabled" in text and "GROQ_API_KEY not set" in text
 
 
-def test_follow_up_and_gemini_settings(tmp_path: Path) -> None:
+def test_follow_up_settings(tmp_path: Path) -> None:
     good = tmp_path / "settings.yaml"
-    good.write_text(
-        "wakeword: {follow_up_s: 0}\n"
-        "gemini: {model: gemini-3.8-flash, web_search: false, thinking_level: minimal}\n"
-    )
-    s = load_settings(good, tmp_path / ".env", environ={})
-    assert s.wakeword.follow_up_s == 0
-    assert (s.gemini.model, s.gemini.web_search, s.gemini.thinking_level) == (
-        "gemini-3.8-flash",
-        False,
-        "minimal",
-    )
-    assert Settings().gemini.model == "gemini-3.5-flash-lite"
-
-    for bad in (
-        "wakeword: {follow_up_s: -1}",
-        "gemini: {thinking_level: huge}",
-        "gemini: {timeout_s: 0}",
-        "gemini: {modle: x}",
-    ):
-        good.write_text(bad + "\n")
-        with pytest.raises(ConfigError):
-            load_settings(good, tmp_path / ".env", environ={})
+    good.write_text("wakeword: {follow_up_s: 0}\n")
+    assert load_settings(good, tmp_path / ".env", environ={}).wakeword.follow_up_s == 0
+    good.write_text("wakeword: {follow_up_s: -1}\n")
+    with pytest.raises(ConfigError):
+        load_settings(good, tmp_path / ".env", environ={})
 
 
 def test_audio_wakeword_and_stt_settings(tmp_path: Path) -> None:
@@ -337,12 +312,10 @@ def test_router_endpoints_and_timeouts(tmp_path: Path) -> None:
     s = load(tmp_path, "router: {groq: {base_url: 'https://g.example/v1', model: m1}}\n")
     assert s.router.endpoint("groq").model == "m1"
     assert s.router.endpoint("gemini").base_url.endswith("/v1beta/openai/")
-    local = s.router.endpoint("local")
-    assert (local.base_url, local.model) == ("http://127.0.0.1:8080/v1", "gemma-4-e4b-it")
-    assert (s.router.timeout_s("groq"), s.router.timeout_s("local")) == (3.0, 15.0)
+    assert s.router.timeout_s("groq") == 3.0
     slow = load(tmp_path, "router: {gemini: {base_url: 'https://g', model: m, timeout_s: 6}}\n")
     assert (slow.router.timeout_s("gemini"), slow.router.timeout_s("groq")) == (6.0, 3.0)
-    assert s.router.history_turns == 6 and s.router.allow_risky is False
+    assert s.router.history_turns == 6
 
 
 def test_openrouter_must_stay_free(tmp_path: Path) -> None:
@@ -352,6 +325,39 @@ def test_openrouter_must_stay_free(tmp_path: Path) -> None:
     assert ok.router.openrouter.model == "x/y:free"
 
 
-def test_demo_mode_enables_local_without_the_flag(tmp_path: Path) -> None:
-    s = load(tmp_path, "demo_mode: true\n", f"GROQ_API_KEY={FAKE_GROQ}\n")
-    assert s.enabled_providers() == ["local"]
+@pytest.mark.parametrize(
+    ("yaml_text", "fragment"),
+    [
+        ("router: {local: {enabled: true}}", "router.local was removed: no local LLM"),
+        ("router: {local_timeout_s: 15}", "router.local_timeout_s was removed"),
+        ("router: {allow_risky: true}", "risky actions are never offered"),
+        ("gemini: {web_search: true}", "web search uses search: (Tavily)"),
+        ("gemini: {image_model: x}", "images use images: (Cloudflare FLUX)"),
+        ("gemini: {model: x}", "settings.gemini was removed"),
+    ],
+)
+def test_removed_settings_fail_with_a_clear_message(
+    tmp_path: Path, yaml_text: str, fragment: str
+) -> None:
+    with pytest.raises(ConfigError, match=re.escape(fragment)):
+        load(tmp_path, yaml_text + "\n")
+
+
+def test_tool_keys_and_settings(tmp_path: Path) -> None:
+    token = "cf" + "ut_" + "x" * 30
+    env = f"CLOUDFLARE_ACCOUNT_ID=abc123\nCLOUDFLARE_API_TOKEN={token}\nTAVILY_API_KEY=tvly-x\n"
+    s = load(tmp_path, "images: {steps: 6}\nsearch: {max_results: 5}\n", env)
+    assert s.secret("cloudflare_account_id") == "abc123" and s.secret("tavily") == "tvly-x"
+    assert s.secret("nope") is None and s.api_key("tavily") is None  # not an LLM provider
+    assert (s.images.steps, s.images.neurons_per_day) == (6, 10_000)
+    assert (s.search.max_results, s.search.credits_per_month) == (5, 1000)
+    assert token in s.secret_values() and token not in repr(s)
+    with pytest.raises(ConfigError):
+        load(tmp_path, "images: {steps: 9}\n")  # the model allows at most 8
+
+
+def test_quota_defaults_and_partial_override(tmp_path: Path) -> None:
+    s = load(tmp_path, "router: {quota: {gemini: {rpd: 500}}}\n")
+    assert s.router.quota["gemini"].rpd == 500
+    assert s.router.quota["groq"].rpm == 30 and s.router.quota["groq"].tpd == 200_000
+    assert s.router.quota["openrouter"].rpd == 50
