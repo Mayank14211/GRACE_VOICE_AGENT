@@ -141,11 +141,16 @@ class TavilySearch:
         if response.status_code != 200:
             return False, f"HTTP {response.status_code}"
         try:
-            key = response.json().get("key") or {}
+            data = response.json()
         except ValueError:
             return False, "unreadable reply"
-        used, limit = key.get("usage"), key.get("limit")
-        return True, f"key ok, {used} of {limit if limit is not None else 'unlimited'} credits used"
+        key, account = data.get("key") or {}, data.get("account") or {}
+        # The plan's limit is on the account; a key's own limit is usually null.
+        used = account.get("plan_usage", key.get("usage"))
+        limit = account.get("plan_limit", key.get("limit"))
+        plan = f" ({account['current_plan']} plan)" if account.get("current_plan") else ""
+        shown = limit if limit is not None else "unlimited"
+        return True, f"key ok, {used} of {shown} credits used this cycle{plan}"
 
 
 def build_search(settings: object, quota: Quota | None = None) -> SearchEngine | None:

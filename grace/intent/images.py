@@ -115,7 +115,8 @@ class CloudflareFlux:
         self.registry = registry
         self.image_dir = image_dir
         self.quota_key = f"cloudflare:{model}"
-        self._url = f"{API}/accounts/{account_id}/ai/run/{model}"
+        self._account_url = f"{API}/accounts/{account_id}"
+        self._url = f"{self._account_url}/ai/run/{model}"
         self._now = now
         self._clock = clock
         self._http = httpx.Client(
@@ -187,16 +188,20 @@ class CloudflareFlux:
         return ImageResult(True, message, [path], ms)
 
     def check(self) -> tuple[bool, str]:
-        """Doctor: is the token active? GET /user/tokens/verify (no model run, no neurons)."""
-        try:
-            response = self._http.get(f"{API}/user/tokens/verify", timeout=5.0)
-        except httpx.HTTPError as exc:
-            return False, f"not reachable ({type(exc).__name__})"
-        data = _json(response)
-        status = (data.get("result") or {}).get("status")
-        if response.status_code == 200 and status == "active":
-            return True, "token active"
-        return False, f"HTTP {response.status_code}, token status {status or 'unknown'}"
+        """Doctor: is the token active? Token verify runs no model and spends no neurons.
+        Account API tokens verify under /accounts/{id}/tokens/verify, user tokens under
+        /user/tokens/verify: try the account one first."""
+        last = "unknown"
+        for url in (f"{self._account_url}/tokens/verify", f"{API}/user/tokens/verify"):
+            try:
+                response = self._http.get(url, timeout=5.0)
+            except httpx.HTTPError as exc:
+                return False, f"not reachable ({type(exc).__name__})"
+            status = (_json(response).get("result") or {}).get("status")
+            if response.status_code == 200 and status == "active":
+                return True, "token active"
+            last = f"HTTP {response.status_code}, token status {status or 'unknown'}"
+        return False, last
 
 
 def _json(response: httpx.Response) -> dict[str, Any]:

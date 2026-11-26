@@ -128,9 +128,21 @@ def test_refused_prompts_never_leave_the_machine(tmp_path: Path) -> None:
 
 
 def test_token_check_for_the_doctor(tmp_path: Path) -> None:
-    flux, seen, _ = make(
-        tmp_path,
-        lambda r: httpx.Response(200, json={"result": {"status": "active"}, "success": True}),
-    )
+    def verify(request):
+        active = "/accounts/acct123/tokens/verify" in str(request.url)
+        body = {"result": {"status": "active"}, "success": True} if active else {"success": False}
+        return httpx.Response(200 if active else 401, json=body)
+
+    flux, seen, _ = make(tmp_path, verify)  # an account API token
     assert flux.check() == (True, "token active")
-    assert str(seen[0].url) == "https://api.cloudflare.com/client/v4/user/tokens/verify"
+    assert str(seen[0].url).endswith("/accounts/acct123/tokens/verify")
+
+    def user_only(request):
+        if "/user/tokens/verify" in str(request.url):
+            return httpx.Response(200, json={"result": {"status": "active"}, "success": True})
+        return httpx.Response(401, json={"success": False})
+
+    flux, seen, _ = make(tmp_path, user_only)  # a user API token
+    assert flux.check() == (True, "token active") and len(seen) == 2
+    bad, _, _ = make(tmp_path, lambda r: httpx.Response(401, json={"success": False}))
+    assert bad.check() == (False, "HTTP 401, token status unknown")

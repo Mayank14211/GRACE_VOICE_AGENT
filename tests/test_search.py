@@ -105,8 +105,10 @@ def test_empty_query_is_not_sent() -> None:
 
 
 def test_usage_check_for_the_doctor() -> None:
-    search, seen = engine(lambda r: httpx.Response(200, json={"key": {"usage": 12, "limit": 1000}}))
-    assert search.check() == (True, "key ok, 12 of 1000 credits used")
+    account = {"current_plan": "Researcher", "plan_usage": 12, "plan_limit": 1000}
+    usage = {"key": {"usage": 12, "limit": None}, "account": account}
+    search, seen = engine(lambda r: httpx.Response(200, json=usage))
+    assert search.check() == (True, "key ok, 12 of 1000 credits used this cycle (Researcher plan)")
     assert seen[0].method == "GET" and seen[0].url == "https://api.tavily.com/usage"
     bad, _ = engine(lambda r: httpx.Response(401, json={}))
     assert bad.check() == (False, "HTTP 401")
