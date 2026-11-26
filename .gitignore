@@ -26,3 +26,6 @@ logs/
 Thumbs.db
 tempCodeRunnerFile*.py
 data/
+
+# Local tools (llama.cpp release for scripts/run_llama_server.ps1)
+tools/

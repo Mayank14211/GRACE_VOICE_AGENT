@@ -7,6 +7,8 @@
     uv run python scripts/fetch_models.py --whisper       # + faster-whisper base (needs
                                                           #   uv sync --extra stt-whisper)
     uv run python scripts/fetch_models.py --moonshine tiny-streaming  # another Moonshine size
+    uv run python scripts/fetch_models.py --llm --only-llm # local LLM for the router, 5.4 GB
+                                                          #   (scripts/run_llama_server.ps1)
 
 Files that are already present with the right hash are skipped. A hash mismatch is an error
 (the file is not replaced silently). Everything lands in models/ (git-ignored).
@@ -30,10 +32,11 @@ from grace.models import (  # noqa: E402
     WHISPER_DIR,
     ModelFile,
     moonshine_dir,
-    sha256,
+    verified,
 )
 
 TIMEOUT_S = 60.0
+BIG_FILE = 100_000_000  # show download progress above this size
 
 
 def fetch(f: ModelFile, models_dir: Path = MODELS_DIR) -> str:
@@ -42,7 +45,7 @@ def fetch(f: ModelFile, models_dir: Path = MODELS_DIR) -> str:
 
     dest = models_dir / f.path
     if dest.is_file():
-        if sha256(dest) == f.sha256:
+        if verified(dest, f.sha256):
             return "present, hash ok"
         return f"HASH MISMATCH (delete {dest} and run again)"
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -51,17 +54,26 @@ def fetch(f: ModelFile, models_dir: Path = MODELS_DIR) -> str:
         try:
             with httpx.stream("GET", f.url, follow_redirects=True, timeout=TIMEOUT_S) as resp:
                 resp.raise_for_status()
+                total = int(resp.headers.get("content-length") or 0)
+                done, shown = 0, 0
                 for chunk in resp.iter_bytes(1 << 16):
                     tmp.write(chunk)
+                    done += len(chunk)
+                    if total > BIG_FILE and done * 10 // total > shown:  # every 10 %
+                        shown = done * 10 // total
+                        print(f"    {f.path}: {shown * 10} % of {total / 1e9:.1f} GB", flush=True)
         except httpx.HTTPError as exc:
             tmp.close()
             tmp_path.unlink(missing_ok=True)
             return f"download failed: {type(exc).__name__}: {exc}"
-    got = sha256(tmp_path)
-    if got != f.sha256:
+    if not verified(tmp_path, f.sha256):
         tmp_path.unlink(missing_ok=True)
-        return f"downloaded file has the wrong hash ({got[:12]}...), not saved"
+        return "downloaded file has the wrong hash, not saved"
     tmp_path.replace(dest)
+    # Keep the "hash checked" stamp: a rename keeps size and mtime, so it stays valid.
+    stamp = tmp_path.with_name(tmp_path.name + ".sha256ok")
+    if stamp.is_file():
+        stamp.replace(dest.with_name(dest.name + ".sha256ok"))
     return "downloaded, hash ok"
 
 
@@ -94,9 +106,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--moonshine", action="append", default=[], metavar="ARCH",
                         choices=["tiny-streaming", "medium-streaming"],
                         help="also another Moonshine size")  # fmt: skip
+    parser.add_argument("--llm", action="store_true",
+                        help="also the local LLM GGUF for llama-server (5.4 GB)")  # fmt: skip
+    parser.add_argument("--only-llm", action="store_true",
+                        help="with --llm: only the LLM, not the voice models")  # fmt: skip
     args = parser.parse_args(argv)
 
-    groups = set(REQUIRED_GROUPS) | ({"wakeword-demo"} if args.demo_wakeword else set())
+    groups = set() if args.only_llm else set(REQUIRED_GROUPS)
+    groups |= {"wakeword-demo"} if args.demo_wakeword else set()
+    groups |= {"llm"} if args.llm or args.only_llm else set()
     failures = 0
     for f in MODEL_FILES:
         if f.group not in groups:

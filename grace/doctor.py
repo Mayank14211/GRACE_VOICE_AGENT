@@ -91,7 +91,7 @@ MODELS: tuple[tuple[str, str], ...] = _required_models()
 ENV_KEYS: tuple[str, ...] = ("GROQ_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY")
 
 # Features from docs/PLAN.md that do not exist yet in the codebase.
-NOT_BUILT: tuple[str, ...] = ("llama-server (M6)",)
+NOT_BUILT: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -309,27 +309,100 @@ def check_grammar() -> Result:
     return Result("command grammar", PASS, detail)
 
 
-def check_assistant(settings_path: Path | None = None, env_path: Path | None = None) -> Result:
-    """Gemini assistant config and tool list (no network call; Gemini is optional)."""
+def check_router(settings_path: Path | None = None, env_path: Path | None = None) -> Result:
+    """LLM router: tool schema from the registry, risky exposure, provider chain (no network)."""
     from grace.actions import create_fake_registry
     from grace.config import ConfigError, load_settings
-    from grace.intent.assistant import registry_tools
+    from grace.intent.tools import EXCLUDED_ACTIONS, build_toolset
 
     try:
         settings = load_settings(settings_path, env_path)
     except ConfigError:
-        return Result("gemini assistant", NOT_CONFIGURED, "settings.yaml invalid (see above)")
-    tools, names = registry_tools(create_fake_registry()[0])
-    if any(create_fake_registry()[0].is_risky(a) for a in names.values()):
-        return Result("gemini assistant", FAIL, "a risky action is exposed to the LLM")
-    if "gemini" not in settings.enabled_providers():
-        return Result("gemini assistant", NOT_CONFIGURED, "GEMINI_API_KEY not set in .env")
+        return Result("llm router", NOT_CONFIGURED, "settings.yaml invalid (see above)")
+    registry = create_fake_registry()[0]
+    allow = settings.router.allow_risky
+    try:
+        toolset = build_toolset(registry, extras=True, allow_risky=allow)
+    except ValueError as exc:  # two actions in one group disagree on a parameter
+        return Result("llm router", FAIL, f"tool schema: {exc}")
+    offered = toolset.intents()
+    if offered & EXCLUDED_ACTIONS:
+        return Result("llm router", FAIL, "a pointer primitive is exposed to the LLM")
+    risky = sorted(a for a in offered if registry.is_risky(a))
+    if risky and not allow:
+        return Result("llm router", FAIL, f"risky actions exposed to the LLM: {risky}")
+    chain = settings.enabled_providers()
+    detail = (
+        f"{len(toolset.tools)} tools; risky via LLM: "
+        f"{'confirmation only' if allow else 'never (exact phrase only)'}; chain: "
+        f"{' -> '.join(chain) if chain else 'none (fixed commands only)'}"
+    )
+    if not chain:
+        return Result("llm router", NOT_CONFIGURED, detail)
+    return Result("llm router", PASS, detail)
+
+
+def check_assistant(settings_path: Path | None = None, env_path: Path | None = None) -> Result:
+    """Gemini extras (web search, images, code analysis): config only, no network call."""
+    from grace.config import ConfigError, load_settings
+
+    try:
+        settings = load_settings(settings_path, env_path)
+    except ConfigError:
+        return Result("gemini extras", NOT_CONFIGURED, "settings.yaml invalid (see above)")
+    if settings.demo_mode:
+        return Result("gemini extras", NOT_CONFIGURED, "demo_mode: no cloud calls")
+    if not settings.api_key("gemini"):
+        return Result("gemini extras", NOT_CONFIGURED, "GEMINI_API_KEY not set in .env")
     g = settings.gemini
     extras = [n for n, on in (("web search", g.web_search), ("images", g.image_generation)) if on]
-    detail = f"{g.model}, {len(tools)} action tools"
+    detail = f"{g.model}: code analysis"
     if extras:
         detail += f"; {' + '.join(extras)} need a billing-enabled key"
-    return Result("gemini assistant", PASS, detail)
+    return Result("gemini extras", PASS, detail)
+
+
+def check_llama_server(
+    settings_path: Path | None = None, env_path: Path | None = None
+) -> list[Result]:
+    """Local LLM: binary, GGUF (sha256, cached) and whether llama-server answers. A problem is a
+    FAIL in demo mode (local is the only provider) and a WARN otherwise (the chain falls back)."""
+    from grace.intent.local_llm import find_binary, is_up
+    from grace.models import LLM_GGUF, by_path, model_path, resolve, verified
+
+    settings = _load_settings_quietly(settings_path, env_path)
+    if settings is None:
+        return [Result("llama-server", NOT_CONFIGURED, "settings.yaml invalid (see above)")]
+    local = settings.router.local
+    if "local" not in settings.enabled_providers():
+        why = "router.local.enabled is false (scripts/run_llama_server.ps1 starts it)"
+        if "local" not in settings.provider_order():
+            why = "local not in router.provider_order"
+        return [Result("llama-server", NOT_CONFIGURED, why)]
+    bad = FAIL if settings.demo_mode else WARN
+    results = []
+    gguf = resolve(local.gguf)
+    pinned = by_path(LLM_GGUF) if gguf == model_path(LLM_GGUF) else None  # else a custom GGUF
+    if not gguf.is_file():
+        hint = "uv run python scripts/fetch_models.py --llm --only-llm"
+        results.append(Result(f"model {gguf.name}", bad, f"missing: {hint}"))
+    elif pinned is None:
+        results.append(Result(f"model {gguf.name}", PASS, "custom model (hash not pinned)"))
+    elif verified(gguf, pinned.sha256):
+        results.append(Result(f"model {gguf.name}", PASS, "hash ok"))
+    else:
+        results.append(Result(f"model {gguf.name}", FAIL, "hash mismatch"))
+    binary = find_binary(local.binary)
+    up, detail = is_up(local.base_url)
+    if up:
+        results.append(Result("llama-server", PASS, detail))
+    elif binary is None:
+        results.append(Result("llama-server", bad, "not installed: winget install ggml.llamacpp"))
+    else:
+        results.append(
+            Result("llama-server", bad, f"{detail}; start it: scripts/run_llama_server.ps1")
+        )
+    return results
 
 
 def check_gestures(settings_path: Path | None = None, env_path: Path | None = None) -> Result:
@@ -629,6 +702,7 @@ def run_checks(hardware: bool = True) -> list[Result]:
         check_mediapipe_legacy_hands,
         check_tesseract,
         check_grammar,
+        check_router,
         check_assistant,
         check_gestures,
         check_hotkeys,
@@ -646,7 +720,7 @@ def run_checks(hardware: bool = True) -> list[Result]:
             check_volume,
             check_brightness,
         ]
-    checks += [check_models, check_env, check_settings, check_not_built]
+    checks += [check_models, check_env, check_settings, check_llama_server, check_not_built]
 
     results: list[Result] = []
     for check in checks:
