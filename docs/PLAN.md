@@ -169,6 +169,14 @@ team uses a billing-enabled key. S07 should fold this into the router's provider
 build a second Gemini client. Image generation re-enters scope by team decision (section 5 had
 removed it).
 
+**Done in S07 (2026-11-26):** conversation and tool calling for all four providers go through
+one OpenAI-compatible path (`grace/intent/router.py`, `providers.py`); Gemini uses its OpenAI
+endpoint there. The Interactions client stays only for the Gemini extras the OpenAI endpoint
+lacks (search grounding, images, code analysis: `grace/intent/assistant.py`). Two decisions to
+note: (1) the local GGUF is bartowski's Q4_K_M of Gemma-4-E4B-it, because ggml-org publishes only
+Q4_0 / Q8_0; (2) risky actions are not offered to the LLM by default (section 3 item 5 asks for the
+exact phrase). `router.allow_risky: true` offers them, always behind the confirmation gate.
+
 Router behaviour: 3 s timeout (cloud), 15 s (local); HTTP 429/error → provider cooldown 60 s → next.
 Keep system prompt + tool list byte-identical across calls so llama-server reuses its prompt cache.
 Expose 8–10 grouped tools, not one per command. Demo mode pins provider order to `[local]`.

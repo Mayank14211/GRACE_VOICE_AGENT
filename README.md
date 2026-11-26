@@ -201,9 +201,9 @@ uv run python -m grace --list-voices
 
 After saying the wake word, you can use these commands. Commands must be the **whole** utterance:
 "volume 40" works, "I said volume 40 yesterday" does nothing. Numbers can be spoken ("forty") or
-digits, and "please" / "can you" in front are ignored. Anything that isn't a fixed command goes
-to the Gemini assistant (see below) when `GEMINI_API_KEY` is set; otherwise GRACE says it didn't
-understand.
+digits, and "please" / "can you" in front are ignored. Anything that isn't a fixed command or a
+follow-up goes to the assistant (LLM router, see below) when a provider is configured; otherwise
+GRACE says it didn't understand.
 
 **Follow-up commands:** say the wake word once, then keep going: "open notepad", "type Hello,
 World!", "close this window". You can also say the command in the same breath as the wake word
@@ -236,27 +236,83 @@ all". While GRACE is talking the mic is ignored, so it doesn't hear itself.
 
 The full vocabulary (synonyms, shortcuts, key names) is in `grace/intent/synonyms.yaml`.
 
-### Gemini assistant (optional)
+### Follow-ups (offline)
 
-With `GEMINI_API_KEY` in `.env`, speech that isn't a fixed command goes to Gemini
-(`gemini.model` in `settings.yaml`, default `gemini-3.5-flash-lite`):
+Right after a volume, brightness or scroll command (within `router.followup_s`, default 2 min),
+these refer to it. They are resolved without any LLM, so they work offline:
+
+| Say | After "volume 40" | After "scroll down" |
+|---|---|---|
+| "A bit more" / "more" / "a lot more" | volume +5 / same step again / +30 | scroll down again |
+| "A bit less" / "too much" | volume -5 | scroll up 1 |
+| "Turn it up" / "down a bit" | volume +10 / -5 | scroll up / down |
+| "Undo that" / "put it back" | volume back to what it was | scroll back |
+| "Now the brightness" / "brightness too" | brightness 40 | - |
+| "Make it 30" | volume 30 | - |
+| "Again" / "do it again" | the last action once more (never a risky one) | |
+
+Plain "undo" is always Ctrl+Z. "Undo that" is Ctrl+Z too when the last action can't be reversed.
+
+### Assistant: the LLM router (optional)
+
+Speech that is neither a fixed command nor a follow-up goes to the router
+(`grace/intent/router.py`). It tries the providers in `router.provider_order`, skipping any
+without a key, and turns the model's answer into GRACE actions:
+
+| Provider (default order) | Model (`router.<provider>.model`) | Needs | Timeout |
+|---|---|---|---|
+| Groq | `openai/gpt-oss-20b` | `GROQ_API_KEY` (free) | 3 s |
+| Gemini (OpenAI endpoint) | `gemini-3.5-flash-lite` | `GEMINI_API_KEY` (free) | 3 s |
+| OpenRouter | `google/gemma-4-26b-a4b-it:free` (must be `:free`) | `OPENROUTER_API_KEY` | 3 s |
+| Local llama-server | Gemma 4 E4B Q4_K_M | `router.local.enabled: true` + llama-server running | 15 s |
+
+- **No crash on any failure.** HTTP 429, a timeout or any error puts that provider in a 60 s
+  cooldown and the next one is tried. If none answers, GRACE says so; fixed commands keep working.
+- **Validated output.** Every tool call is checked against the action's pydantic model. A bad
+  reply gets one retry, then GRACE asks you to rephrase.
+- **Memory.** The last `router.history_turns` (6) exchanges and the last action are sent with
+  each request: "What's the capital of France?" then "And how many people live there?" works.
+  "Start over" forgets. After `router.memory_reset_s` (10 min) of silence it forgets by itself.
+- **Several steps**: "set the sound to thirty and then open notepad" runs both, in order.
+- **Answers** are at most two spoken sentences.
+- **Risky actions**: by default the LLM can't shut down, restart or sleep the computer. It tells
+  you the exact phrase to say. With `router.allow_risky: true` it may propose them, and GRACE
+  still asks "Confirm shutdown? Say yes or press Ctrl+Alt+Y."
+- The provider that answered last is shown on the status chip (`offline` when none did).
+- Gemini's free tier answered in 1.4-3.5 s on the base machine, so the 3 s budget sometimes
+  trips. Groq is the fast primary; give Gemini more room with `router.gemini.timeout_s: 6.0`.
+
+**Local model (offline / demo mode).** Install llama.cpp (`winget install ggml.llamacpp`), then:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_llama_server.ps1
+```
+
+The script downloads `models/llm/google_gemma-4-E4B-it-Q4_K_M.gguf` (5.4 GB, sha256-checked)
+the first time. It then starts llama-server with `--jinja` (tool calls), reasoning off and
+`-t <inference.threads>`. Then set `router.local.enabled: true`. `demo_mode: true` pins the
+router to the local model and warms it up at start, so the first request is fast.
+`uv run python -m grace doctor` reports whether llama-server answers.
+`uv run python scripts/bench_threads.py --llm` finds the fastest thread count.
+
+**Gemini extras** (`gemini:` in `settings.yaml`, needs `GEMINI_API_KEY`, off in demo mode):
 
 | Ask | What happens | Gemini tier needed |
 |---|---|---|
-| "What's the capital of France?" / "And its population?" | Short spoken answer; remembers the conversation ("start over" forgets it) | Free |
-| "Turn the volume down a bit and open youtube" | Tool calling: Gemini uses GRACE's actions (volume, apps, keys, typing...) | Free |
+| "Analyze the code" / "Debug this code" | Selected code is reviewed by Gemini | Free |
 | "Search the web for today's weather in Delhi" | Google Search grounding; sources printed in the console | **Billing-enabled key** |
 | "Generate an image of a cat in sunglasses" | Image saved to `Pictures\GRACE` and opened | **Billing-enabled key** |
-| "Analyze the code" / "Debug this code" | Selected code is reviewed by Gemini | Free |
 
 - Google gives **no free quota** for search grounding or image generation. On a free key GRACE
   says so instead of failing silently. Turn them off with `gemini.web_search: false` /
   `gemini.image_generation: false`.
-- Gemini can **never** shut down, restart or sleep the computer. Those stay exact-phrase +
-  confirmation only.
-- Privacy: what you say to the assistant, and code you ask it to analyze, is sent to Google.
-  Free-tier inputs may be used to improve Google's models. Action results sent back to Gemini
-  are only the spoken message (e.g. "Copied."), never clipboard contents.
+- Privacy: what you say to the assistant goes to the cloud provider that answers. Code you ask
+  it to analyze goes to Google. Free-tier inputs may be used to improve the providers' models.
+  The router never sends action data back (clipboard contents, typed text, screen text): it
+  sends only your words and the last action's name. Screen reading (OCR) stays on the machine.
+- Measure it: `uv run python scripts/eval_router.py` runs 20 free-form requests and logs the
+  provider, latency and success (`--providers local` for network off, `--save` writes
+  `docs/results/router.md`).
 
 - **Text Input**:
   - "Dictate" - Starts dictation mode
@@ -362,7 +418,9 @@ GRACE Voice Agent is built with a modular architecture consisting of:
    segmenter), `wakeword.py` (openWakeWord), `stt/` (Moonshine, faster-whisper, Groq behind one
    `transcribe_stream` interface) and `voice.py` (wake word, follow-ups, push-to-talk, dictation;
    voice, STT and intent threads). `grace/legacy_voice.py` turns each final transcript into
-   commands and replies
+   commands and replies: grammar, then follow-ups (`grace/intent/dialogue.py`), then the LLM
+   router (`grace/intent/router.py`, providers in `providers.py`, tool schema generated from the
+   registry in `tools.py`)
 2. **Text-to-Speech Module**: Provides voice output
 3. **Command grammar** (`grace/intent/grammar.py`): turns a whole utterance into an Intent; no
    keyword-contains matching
