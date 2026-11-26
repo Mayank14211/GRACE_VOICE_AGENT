@@ -205,10 +205,10 @@ def test_quiet_actions_log_at_debug(reg, caplog: pytest.LogCaptureFixture) -> No
 
 
 def test_pointer_primitives_are_not_llm_tools(reg) -> None:
-    from grace.intent.assistant import registry_tools
+    from grace.intent.tools import build_toolset
 
-    _, names = registry_tools(reg[0])
-    assert not {"input.move_to", "input.mouse_down", "input.mouse_up"} & set(names.values())
+    offered = build_toolset(reg[0], extras=True, allow_risky=True).intents()
+    assert not {"input.move_to", "input.mouse_down", "input.mouse_up"} & offered
 
 
 def test_type_ascii_writes_once(reg) -> None:
