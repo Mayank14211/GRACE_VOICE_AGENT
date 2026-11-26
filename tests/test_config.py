@@ -328,3 +328,30 @@ def test_audio_wakeword_and_stt_settings(tmp_path: Path) -> None:
         good.write_text(bad + "\n")
         with pytest.raises(ConfigError):
             load_settings(good, tmp_path / ".env", environ={})
+
+
+# ---------------------------------------------------------------- router (S07)
+
+
+def test_router_endpoints_and_timeouts(tmp_path: Path) -> None:
+    s = load(tmp_path, "router: {groq: {base_url: 'https://g.example/v1', model: m1}}\n")
+    assert s.router.endpoint("groq").model == "m1"
+    assert s.router.endpoint("gemini").base_url.endswith("/v1beta/openai/")
+    local = s.router.endpoint("local")
+    assert (local.base_url, local.model) == ("http://127.0.0.1:8080/v1", "gemma-4-e4b-it")
+    assert (s.router.timeout_s("groq"), s.router.timeout_s("local")) == (3.0, 15.0)
+    slow = load(tmp_path, "router: {gemini: {base_url: 'https://g', model: m, timeout_s: 6}}\n")
+    assert (slow.router.timeout_s("gemini"), slow.router.timeout_s("groq")) == (6.0, 3.0)
+    assert s.router.history_turns == 6 and s.router.allow_risky is False
+
+
+def test_openrouter_must_stay_free(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match=":free"):
+        load(tmp_path, "router: {openrouter: {base_url: 'https://o.example', model: gpt-5}}\n")
+    ok = load(tmp_path, "router: {openrouter: {base_url: 'https://o', model: 'x/y:free'}}\n")
+    assert ok.router.openrouter.model == "x/y:free"
+
+
+def test_demo_mode_enables_local_without_the_flag(tmp_path: Path) -> None:
+    s = load(tmp_path, "demo_mode: true\n", f"GROQ_API_KEY={FAKE_GROQ}\n")
+    assert s.enabled_providers() == ["local"]

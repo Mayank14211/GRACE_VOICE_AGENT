@@ -153,10 +153,10 @@ class SttSettings(_Section):
 
 
 class GeminiSettings(_Section):
-    """Gemini assistant for requests the fixed grammar doesn't understand (needs GEMINI_API_KEY).
-
-    Text answers and tool calling work on the free tier. Web search (Google Search grounding)
-    and image generation need a key from a billing-enabled Google Cloud project.
+    """Gemini extras over the Interactions API (needs GEMINI_API_KEY): web search, image
+    generation and code analysis. Conversation and tool calling go through the router
+    (router.gemini). Web search (Google Search grounding) and image generation need a key from
+    a billing-enabled Google Cloud project; code analysis works on the free tier.
     """
 
     model: str = "gemini-3.5-flash-lite"
@@ -166,7 +166,7 @@ class GeminiSettings(_Section):
     thinking_level: Literal["minimal", "low", "medium", "high"] = "low"
     timeout_s: float = Field(20.0, gt=0.0, le=120.0)
     image_timeout_s: float = Field(90.0, gt=0.0, le=300.0)
-    # Forget the conversation after this long without a question (0 = never forget).
+    # Unused since S07 (conversation memory is router.memory_reset_s); kept so old files load.
     memory_reset_s: float = Field(600.0, ge=0.0, le=86400.0)
 
 
@@ -245,24 +245,104 @@ class GestureSettings(_Section):
         return self
 
 
+class ProviderEndpoint(_Section):
+    """One OpenAI-compatible chat endpoint. Model IDs live here, never in code (they change)."""
+
+    base_url: str
+    model: str = Field(min_length=1)
+    # Sent as `reasoning_effort` (Groq gpt-oss, Gemini's OpenAI endpoint). None = not sent.
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] | None = None
+    # Per-provider request timeout; None = router.cloud_timeout_s (3 s). Gemini's free tier
+    # answered in 1.4-3.5 s on the base machine (2026-11-26), so it may need more headroom.
+    timeout_s: float | None = Field(None, gt=0.0, le=60.0)
+
+
+def _groq_endpoint() -> ProviderEndpoint:
+    # console.groq.com/docs (checked 2026-11-26): OpenAI-compatible base URL; gpt-oss-20b does
+    # tool use and JSON mode, but not parallel tool calls.
+    return ProviderEndpoint(
+        base_url="https://api.groq.com/openai/v1",
+        model="openai/gpt-oss-20b",
+        reasoning_effort="low",
+    )
+
+
+def _gemini_endpoint() -> ProviderEndpoint:
+    # ai.google.dev/gemini-api/docs/openai: chat.completions with tools on the Gemini API key.
+    return ProviderEndpoint(
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        model="gemini-3.5-flash-lite",
+        reasoning_effort="low",
+    )
+
+
+def _openrouter_endpoint() -> ProviderEndpoint:
+    # openrouter.ai/api/v1/models, filtered on ":free" + "tools" (2026-11-26). The free list
+    # changes often: re-check it if this model disappears.
+    return ProviderEndpoint(
+        base_url="https://openrouter.ai/api/v1", model="google/gemma-4-26b-a4b-it:free"
+    )
+
+
 class LocalLLMSettings(_Section):
-    enabled: bool = False
+    """llama.cpp llama-server on this machine (scripts/run_llama_server.ps1 starts it)."""
+
+    enabled: bool = False  # demo_mode switches it on as well
     base_url: str = "http://127.0.0.1:8080/v1"
+    model: str = "gemma-4-e4b-it"  # llama-server serves one model; the name is informational
+    gguf: Path = Path("models/llm/google_gemma-4-E4B-it-Q4_K_M.gguf")
+    ctx_size: int = Field(8192, ge=2048, le=131072)
+    binary: Path | None = None  # llama-server.exe; None = look on PATH and in tools/llama.cpp
 
 
 class RouterSettings(_Section):
+    """grace/intent/router.py: the LLM fallback for anything the fixed grammar doesn't parse."""
+
     provider_order: list[Provider] = Field(default_factory=lambda: list(ALL_PROVIDERS))
     cloud_timeout_s: float = Field(3.0, gt=0.0, le=30.0)
     local_timeout_s: float = Field(15.0, gt=0.0, le=120.0)
-    max_retries: int = Field(1, ge=0, le=3)
+    max_retries: int = Field(1, ge=0, le=3)  # network errors / 5xx only; never 429 or timeouts
     cooldown_s: float = Field(60.0, ge=0.0, le=3600.0)
+    # Dialogue memory: user + GRACE exchanges sent with each request, and how long a pause
+    # makes GRACE forget them. Follow-ups ("a bit more", "undo that") refer to the last action
+    # for followup_s.
+    history_turns: int = Field(6, ge=0, le=20)
+    memory_reset_s: float = Field(600.0, ge=0.0, le=86400.0)
+    followup_s: float = Field(120.0, ge=5.0, le=3600.0)
+    max_tokens: int = Field(300, ge=32, le=4096)
+    temperature: float = Field(0.2, ge=0.0, le=2.0)
+    # Offer shutdown / restart / sleep to the LLM (always behind the confirmation prompt).
+    # Off by default: docs/PLAN.md requires the exact phrase for these.
+    allow_risky: bool = False
+    groq: ProviderEndpoint = Field(default_factory=_groq_endpoint)
+    gemini: ProviderEndpoint = Field(default_factory=_gemini_endpoint)
+    openrouter: ProviderEndpoint = Field(default_factory=_openrouter_endpoint)
     local: LocalLLMSettings = Field(default_factory=LocalLLMSettings)
 
     @model_validator(mode="after")
     def _no_duplicates(self) -> RouterSettings:
         if len(set(self.provider_order)) != len(self.provider_order):
             raise ValueError(f"router.provider_order has duplicates: {self.provider_order}")
+        if not self.openrouter.model.endswith(":free") and self.openrouter.model != (
+            "openrouter/free"
+        ):
+            raise ValueError(
+                "router.openrouter.model must be a ':free' model (zero running cost): "
+                f"{self.openrouter.model!r}"
+            )
         return self
+
+    def endpoint(self, provider: Provider) -> ProviderEndpoint:
+        if provider == "local":
+            return ProviderEndpoint(base_url=self.local.base_url, model=self.local.model)
+        endpoint: ProviderEndpoint = getattr(self, provider)
+        return endpoint
+
+    def timeout_s(self, provider: Provider) -> float:
+        if provider == "local":
+            return self.local_timeout_s
+        own: float | None = getattr(self, provider).timeout_s
+        return own if own is not None else self.cloud_timeout_s
 
 
 class ApiKeys(BaseModel):
@@ -315,7 +395,7 @@ class Settings(_Section):
                 why = "demo_mode pins [local]" if self.demo_mode else "not in router.provider_order"
                 statuses.append(ProviderStatus(provider, False, why))
             elif provider == "local":
-                ok = self.router.local.enabled
+                ok = self.router.local.enabled or self.demo_mode
                 why = (
                     f"llama-server at {self.router.local.base_url}"
                     if ok

@@ -9,7 +9,8 @@
 # Speech language. en = English (offline STT). hi / auto need a cloud or Whisper STT (Phase 2).
 language: en
 
-# Demo mode pins the LLM router to the local llama-server only (no cloud calls, predictable latency).
+# Demo mode pins the LLM router to the local llama-server only (no cloud calls, predictable latency)
+# and warms the model up at start. Start llama-server first: scripts/run_llama_server.ps1
 demo_mode: false
 
 # Global hotkeys (the PRIMARY toggles; voice equivalents are never relied on).
@@ -118,29 +119,57 @@ gestures:
   cursor_beta: 10.0       # One Euro filter: higher = less lag when the hand moves fast
 
 router:
-  # LLM fallback order for input the fixed grammar does not match.
+  # The LLM fallback for whatever the fixed commands and follow-ups don't match.
   # Providers: groq, gemini, openrouter (need a key in .env), local (llama-server).
-  # A provider without its key is skipped automatically.
+  # A provider without its key is skipped automatically. Fixed commands never call an LLM.
   provider_order: [groq, gemini, openrouter, local]
   cloud_timeout_s: 3.0    # per-request timeout for cloud providers
   local_timeout_s: 15.0   # per-request timeout for the local llama-server
-  max_retries: 1          # retries per provider before moving to the next (0-3)
-  cooldown_s: 60.0        # after an HTTP 429 or error, skip that provider for this long
+  max_retries: 1          # retries on network errors / 5xx (0-3); never on 429 or timeouts
+  cooldown_s: 60.0        # after an HTTP 429, timeout or error, skip that provider for this long
+  history_turns: 6        # user + GRACE exchanges sent as context (0 = no memory)
+  memory_reset_s: 600.0   # forget the conversation after this long without a command (0 = never)
+  followup_s: 120.0       # "a bit more" / "undo that" refer to the last action for this long
+  max_tokens: 300         # longest reply the model may write
+  temperature: 0.2        # lower = more predictable tool choice
+  allow_risky: false      # true = the LLM may propose shutdown / restart / sleep (always asks to
+                          # confirm). false = those need the exact phrase ("shut down the computer")
+  # Model IDs change: re-check them in each provider's docs (dates in grace/config.py).
+  groq:
+    base_url: https://api.groq.com/openai/v1
+    model: openai/gpt-oss-20b
+    reasoning_effort: low  # none | minimal | low | medium | high | null (not sent)
+    timeout_s: null        # seconds; null = cloud_timeout_s
+  gemini:
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+    model: gemini-3.5-flash-lite
+    reasoning_effort: low
+    timeout_s: null        # free tier took 1.4-3.5 s here; try 6.0 if it times out
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    model: google/gemma-4-26b-a4b-it:free  # must be a ":free" model (zero running cost)
+    reasoning_effort: null
+    timeout_s: null
   local:
-    enabled: false        # true once llama-server is running (scripts/run_llama_server.ps1)
+    enabled: false        # true once llama-server runs (scripts/run_llama_server.ps1); demo_mode
+                          # turns it on as well
     base_url: http://127.0.0.1:8080/v1
+    model: gemma-4-e4b-it # llama-server serves one model; the name is informational
+    gguf: models/llm/google_gemma-4-E4B-it-Q4_K_M.gguf  # fetch_models.py --llm downloads it
+    ctx_size: 8192        # context window (tokens)
+    binary: null          # path to llama-server.exe; null = PATH (winget install ggml.llamacpp)
+                          # or tools/llama.cpp/
 
 gemini:
-  # Assistant for anything the fixed commands don't cover: questions, "search the web for ...",
-  # "generate an image of ...", and multi-step requests that use GRACE's actions (tool calling).
-  # Needs GEMINI_API_KEY in .env. Free tier: text answers + tool calling.
-  # Web search and image generation need a key from a BILLING-ENABLED project (no free quota).
-  # Risky actions (shutdown, restart, sleep) are never available to the model.
-  model: gemini-3.5-flash-lite          # text + tool calling
+  # Gemini extras over the Interactions API (needs GEMINI_API_KEY): code analysis ("analyze this
+  # code", free tier), "search the web for ..." and "generate an image of ..." (both need a key
+  # from a BILLING-ENABLED project: there is no free quota). Conversation goes through the
+  # router (router.gemini above). Off in demo mode.
+  model: gemini-3.5-flash-lite          # code analysis + web search answers
   image_model: gemini-3.1-flash-image   # "Nano Banana 2"; images saved to Pictures/GRACE
   web_search: true                      # Google Search grounding
   image_generation: true
   thinking_level: low                   # minimal | low | medium | high (higher = slower)
   timeout_s: 20.0                       # per request
   image_timeout_s: 90.0                 # image generation is slower
-  memory_reset_s: 600.0                 # forget the conversation after this long (0 = never)
+  memory_reset_s: 600.0                 # unused since S07 (see router.memory_reset_s)
