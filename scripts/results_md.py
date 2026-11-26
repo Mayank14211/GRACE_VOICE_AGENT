@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 STT_RESULTS = ROOT / "docs" / "results" / "stt.md"
+ROUTER_RESULTS = ROOT / "docs" / "results" / "router.md"
 
 
 def replace_section(text: str, name: str, body: str) -> str:

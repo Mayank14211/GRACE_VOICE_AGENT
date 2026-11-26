@@ -2,12 +2,18 @@
 
     uv run python scripts/bench_threads.py                  # 4 / 6 / 8 threads
     uv run python scripts/bench_threads.py --save           # + docs/results/stt.md
+    uv run python scripts/bench_threads.py --llm --save     # + local LLM: docs/results/router.md
 
 faster-whisper (extra [stt-whisper]) runs at each thread count (cpu_threads); Moonshine has no
 thread setting, so it is measured with onnxruntime's default and with one thread
 (MOONSHINE_ORT_SINGLE_THREAD=1) for reference. Every configuration runs in its own process so
 thread pools never mix. Never 12: logical-thread counts make inference slower (docs/PLAN.md 2).
-The LLM (llama-server) joins this benchmark in M6.
+
+--llm (M6): llama-server is started at each thread count (-t N) on a spare port, warmed up with
+the router's system prompt + tools, then sent the same router requests; reported: median
+request latency, prompt and generation tokens/s (llama-server's own timings). Needs llama-server
+and the GGUF (scripts/run_llama_server.ps1 sets both up). A llama-server already running on
+router.local.base_url is left alone.
 
 Run on mains power, Windows power mode "Best performance", nothing else heavy running.
 """
@@ -28,6 +34,7 @@ for p in (ROOT, ROOT / "scripts"):
         sys.path.insert(0, str(p))
 
 from results_md import (  # noqa: E402
+    ROUTER_RESULTS,
     STT_RESULTS,
     median,
     stamp,
@@ -37,6 +44,14 @@ from results_md import (  # noqa: E402
 )
 
 MAX_THREADS = 8
+LLM_PORT = 8089  # not router.local.base_url's 8080: a running server is never disturbed
+LLM_PROMPTS = (
+    "what is the capital of japan",
+    "turn the sound down a little",
+    "please open notepad for me",
+    "what can you do",
+    "scroll down a bit on this page",
+)
 
 
 def pick_files(audio_dir: Path | None, limit: int) -> list[Path]:
@@ -98,6 +113,120 @@ def run_child(engine: str, threads: int, files: list[Path], env_extra: dict[str,
     return json.loads(lines[-1])
 
 
+# --------------------------------------------------------------------------- LLM
+def llm_summary(samples: list[dict]) -> dict:
+    """Per-request samples -> median latency and tokens/s (pure)."""
+
+    def med(key: str) -> float:
+        return median([float(s[key]) for s in samples if s.get(key) is not None])
+
+    return {
+        "latency_ms": med("latency_ms"),
+        "prompt_tps": med("prompt_per_second"),
+        "gen_tps": med("predicted_per_second"),
+        "ok": sum(1 for s in samples if s.get("ok")),
+        "n": len(samples),
+    }
+
+
+def bench_llm_threads(settings, threads: int, prompts: tuple[str, ...]) -> dict:
+    """Start llama-server with ``threads``, measure, stop it. {"error": ...} on failure."""
+    from grace.actions import create_fake_registry
+    from grace.intent.local_llm import command_from_settings, wait_until_up
+    from grace.intent.providers import (
+        LOCAL_API_KEY,
+        OpenAIChatProvider,
+        ProviderError,
+        make_openai_client,
+    )
+    from grace.intent.router import Router
+    from grace.intent.tools import build_toolset
+
+    base_url = f"http://127.0.0.1:{LLM_PORT}/v1"
+    try:
+        cmd = command_from_settings(settings, threads=threads, base_url=base_url)
+    except (FileNotFoundError, ValueError) as exc:
+        return {"error": str(exc)}
+    started = time.perf_counter()
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not wait_until_up(base_url, timeout_s=600):
+            return {"error": "llama-server did not come up within 10 minutes"}
+        load_ms = (time.perf_counter() - started) * 1000
+        client = make_openai_client(base_url, LOCAL_API_KEY)
+        provider = OpenAIChatProvider("local", client, settings.router.local.model, timeout_s=120)
+        router = Router([provider], build_toolset(create_fake_registry()[0]))
+        router.warm_up(timeout_s=600)  # prompt cache filled, as in demo mode
+        samples = []
+        for prompt in prompts:
+            try:
+                reply = provider.chat(
+                    router.messages(prompt),
+                    router.toolset.tools,
+                    max_tokens=settings.router.max_tokens,
+                    temperature=0.0,
+                )
+            except ProviderError as exc:
+                samples.append({"ok": False, "error": str(exc)})
+                continue
+            samples.append(
+                {
+                    "ok": bool(reply.tool_calls or reply.content),
+                    "latency_ms": reply.latency_ms,
+                    "prompt_per_second": reply.timings.get("prompt_per_second"),
+                    "predicted_per_second": reply.timings.get("predicted_per_second"),
+                }
+            )
+        return {"load_ms": load_ms, **llm_summary(samples)}
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def bench_llm(settings, counts: list[int]) -> tuple[list[str], int | None]:
+    rows, latency = [], {}
+    for t in counts:
+        r = bench_llm_threads(settings, t, LLM_PROMPTS)
+        if "error" in r:
+            print(f"  llama-server x{t}: {r['error']}")
+            continue
+        latency[t] = r["latency_ms"]
+        print(
+            f"  llama-server x{t}: {r['latency_ms']:.0f} ms per request, prompt "
+            f"{r['prompt_tps']:.0f} tok/s, generation {r['gen_tps']:.1f} tok/s "
+            f"({r['ok']}/{r['n']} answered)"
+        )
+        rows.append(
+            [
+                settings.router.local.gguf.name,
+                str(t),
+                f"{r['latency_ms']:.0f}",
+                f"{r['prompt_tps']:.0f}",
+                f"{r['gen_tps']:.1f}",
+                f"{r['ok']}/{r['n']}",
+                f"{r['load_ms'] / 1000:.0f}",
+            ]
+        )
+    if not rows:
+        return [], None
+    best = recommend(latency)
+    lines = [
+        f"Run {stamp()}. {len(LLM_PROMPTS)} router requests per thread count after a warm-up "
+        "(system prompt + tools cached). Latency = request sent -> full reply (non-streaming).",
+        "",
+        table(
+            ["model", "threads", "median ms", "prompt tok/s", "gen tok/s", "answered", "load s"],
+            rows,
+        ),
+        "",
+        f"**Recommendation:** `inference.threads: {best}` for llama-server on this machine.",
+    ]
+    return lines, best
+
+
 # --------------------------------------------------------------------------- main
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
@@ -110,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--audio-dir", type=Path, default=None)
     parser.add_argument("--limit", type=int, default=20, help="recordings per configuration")
     parser.add_argument("--save", action="store_true")
-    parser.add_argument("--llm", action="store_true", help="also llama-server (from M6)")
+    parser.add_argument("--llm", action="store_true", help="also llama-server (local LLM)")
     args = parser.parse_args(argv)
     use_utf8_output()
 
@@ -147,8 +276,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  moonshine {arch} threads {label}: {r['latency_ms']:.0f} ms after end of audio, "
               f"RTF {r['rtf']:.3f}")  # fmt: skip
         rows.append(row(f"moonshine {arch}", label, r))
+    llm_lines: list[str] = []
     if args.llm:
-        print("  LLM: llama-server arrives in M6; nothing to benchmark yet")
+        llm_lines, best_llm = bench_llm(settings, counts)
+        if best_llm is not None:
+            print(f"Recommended inference.threads for llama-server: {best_llm}")
 
     lines = [
         f"Run {stamp()}. {len(files)} recordings from "
@@ -170,6 +302,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.save:
         write_section(STT_RESULTS, "bench_threads", f"### bench_threads\n\n{text}")
         print(f"Saved to {STT_RESULTS.relative_to(ROOT)}")
+        if llm_lines:
+            body = "### bench_threads --llm\n\n" + "\n".join(llm_lines)
+            write_section(ROUTER_RESULTS, "bench_llm", body)
+            print(f"Saved to {ROUTER_RESULTS.relative_to(ROOT)}")
     return 0
 
 

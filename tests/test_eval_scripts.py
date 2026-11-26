@@ -109,3 +109,32 @@ def test_m5_acceptance_moonshine_median_under_500_ms(capsys: pytest.CaptureFixtu
     assert eval_stt.main(["--engines", "moonshine"]) == 0
     out = capsys.readouterr().out
     assert "**MET**" in out, out
+
+
+def test_llm_summary_takes_medians() -> None:
+    samples = [
+        {"ok": True, "latency_ms": 900, "prompt_per_second": 60, "predicted_per_second": 9},
+        {"ok": True, "latency_ms": 1100, "prompt_per_second": 80, "predicted_per_second": 11},
+        {"ok": False, "error": "timeout"},
+    ]
+    s = bench_threads.llm_summary(samples)
+    assert (s["latency_ms"], s["prompt_tps"], s["gen_tps"]) == (1000, 70, 10)
+    assert (s["ok"], s["n"]) == (2, 3)
+
+
+def test_eval_router_requests_are_free_form_and_report_counts_router_rows() -> None:
+    import eval_router
+
+    grammar = default_grammar()
+    assert len(eval_router.REQUESTS) == 20
+    assert all(grammar.parse(text) is None for text, _ in eval_router.REQUESTS)
+    rows = [
+        eval_router.Row("a", "router", "groq", 400, ["volume.step"], True),
+        eval_router.Row("b", "router", "local", 2000, [], False),
+        eval_router.Row("c", "grammar", "-", 1, ["volume.set"], False),
+    ]
+    text = eval_router.report(rows, ["groq", "local"])
+    assert (
+        "1/2 router requests succeeded" in text
+        and "| 3 | c | - | 1 | volume.set | grammar |" in text
+    )
