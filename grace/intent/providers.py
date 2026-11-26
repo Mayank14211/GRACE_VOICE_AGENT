@@ -51,6 +51,13 @@ class ProviderTimeoutError(ProviderUnavailableError):
     retryable = False
 
 
+class ProviderConnectionError(ProviderUnavailableError):
+    """No connection at all (offline, DNS, refused). Not retried: the router moves on at once,
+    so "network off" costs one attempt per provider, not two."""
+
+    retryable = False
+
+
 class ProviderAuthError(ProviderError):
     """401/403: the key is wrong, revoked or lacks access."""
 
@@ -266,7 +273,7 @@ def _chat_error(provider: str, exc: Exception) -> ProviderError:
     if isinstance(exc, openai.APITimeoutError):
         return ProviderTimeoutError(f"{label} took too long to answer.")
     if isinstance(exc, openai.APIConnectionError):
-        return ProviderUnavailableError(f"I couldn't reach {label}.")
+        return ProviderConnectionError(f"I couldn't reach {label}.")
     if isinstance(exc, openai.APIStatusError):
         status = exc.status_code
         if status == 429:

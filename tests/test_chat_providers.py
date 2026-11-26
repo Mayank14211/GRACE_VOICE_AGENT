@@ -12,6 +12,7 @@ from grace.config import load_settings
 from grace.intent.providers import (
     OpenAIChatProvider,
     ProviderAuthError,
+    ProviderConnectionError,
     ProviderRequestError,
     ProviderTimeoutError,
     ProviderUnavailableError,
@@ -122,20 +123,26 @@ def test_timeout_is_not_retried() -> None:
     assert len(seen) == 1
 
 
-def test_5xx_and_connection_errors_are_retried() -> None:
+def test_5xx_is_retried_but_no_connection_is_not() -> None:
     def flaky(request, n):
         if n == 1:
             return httpx.Response(503, json={"error": {}})
-        if n == 2:
-            raise httpx.ConnectError("refused", request=request)
         return completion({"role": "assistant", "content": "ok"})
 
     provider, seen = provider_with(flaky, retries=2)
-    assert chat(provider).content == "ok" and len(seen) == 3
+    assert chat(provider).content == "ok" and len(seen) == 2
     provider, seen = provider_with(lambda r, n: httpx.Response(500, json={}), retries=1)
     with pytest.raises(ProviderUnavailableError):
         chat(provider)
     assert len(seen) == 2
+
+    def offline(request, n):
+        raise httpx.ConnectError("getaddrinfo failed", request=request)
+
+    provider, seen = provider_with(offline, retries=3)
+    with pytest.raises(ProviderConnectionError):
+        chat(provider)
+    assert len(seen) == 1  # network off: move to the next provider at once
 
 
 @pytest.mark.parametrize(
