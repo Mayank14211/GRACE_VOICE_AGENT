@@ -101,23 +101,6 @@ MODEL_FILES: tuple[ModelFile, ...] = (
     ),
 )
 
-# Local LLM for the router (llama-server, S07). Gemma 4 E4B instruction-tuned, Q4_K_M. The
-# official ggml-org repo ships only Q4_0 / Q8_0 / BF16, so this is bartowski's imatrix Q4_K_M
-# (same llama.cpp quantisation). 5.4 GB. Gemma licence (Gemma Terms of Use).
-LLM_GGUF = "llm/google_gemma-4-E4B-it-Q4_K_M.gguf"
-MODEL_FILES = (
-    *MODEL_FILES,
-    ModelFile(
-        LLM_GGUF,
-        "https://huggingface.co/bartowski/google_gemma-4-E4B-it-GGUF/resolve/main/"
-        "google_gemma-4-E4B-it-Q4_K_M.gguf",
-        "d35a3aa7a6d47de237fd488bb6f7f3efd62908d828f85a63da0ee93acdbefe9f",
-        "llm",
-        "Gemma Terms of Use",
-    ),
-)
-LLM_GGUF_SIZE = 5_405_170_144
-
 # Needed for voice to start at all (the demo wake-word model is optional).
 REQUIRED_GROUPS = ("vad", "wakeword", "moonshine:small-streaming")
 
@@ -144,33 +127,6 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def verified(path: Path, expected: str, *, stamp_suffix: str = ".sha256ok") -> bool:
-    """sha256 check that remembers a good result in ``<file>.sha256ok`` (hash, size, mtime),
-    so multi-GB files (the LLM) are hashed once, not on every doctor / fetch run."""
-    if not path.is_file():
-        return False
-    st = path.stat()
-    token = f"{expected.lower()} {st.st_size} {st.st_mtime_ns}"
-    stamp = path.with_name(path.name + stamp_suffix)
-    try:
-        if stamp.read_text(encoding="utf-8").strip() == token:
-            return True
-    except OSError:
-        pass
-    if sha256(path) != expected.lower():
-        stamp.unlink(missing_ok=True)
-        return False
-    try:
-        stamp.write_text(token, encoding="utf-8")
-    except OSError:
-        pass
-    return True
-
-
-def by_path(rel: str) -> ModelFile | None:
-    return next((f for f in MODEL_FILES if f.path == rel), None)
 
 
 def files_in(group: str) -> tuple[ModelFile, ...]:
