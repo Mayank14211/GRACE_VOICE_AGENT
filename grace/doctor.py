@@ -87,8 +87,16 @@ def _required_models() -> tuple[tuple[str, str], ...]:
 MODELS: tuple[tuple[str, str], ...] = _required_models()
 
 # Keys GRACE may read from .env (all optional: cloud providers are accelerators only).
-# Must match grace.config.ENV_KEYS (tests/test_doctor.py checks this).
-ENV_KEYS: tuple[str, ...] = ("GROQ_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY")
+# Must match grace.config.ALL_ENV_KEYS (tests/test_doctor.py checks this).
+ENV_KEYS: tuple[str, ...] = (
+    "GROQ_API_KEY",
+    "GEMINI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "CLOUDFLARE_ACCOUNT_ID",
+    "CLOUDFLARE_API_TOKEN",
+    "TAVILY_API_KEY",
+)
+REACH_TIMEOUT_S = 5.0
 
 # Features from docs/PLAN.md that do not exist yet in the codebase.
 NOT_BUILT: tuple[str, ...] = ()
@@ -310,7 +318,7 @@ def check_grammar() -> Result:
 
 
 def check_router(settings_path: Path | None = None, env_path: Path | None = None) -> Result:
-    """LLM router: tool schema from the registry, risky exposure, provider chain (no network)."""
+    """LLM router: tool schema from the registry, no risky tools, provider chain (no network)."""
     from grace.actions import create_fake_registry
     from grace.config import ConfigError, load_settings
     from grace.intent.tools import EXCLUDED_ACTIONS, build_toolset
@@ -320,89 +328,94 @@ def check_router(settings_path: Path | None = None, env_path: Path | None = None
     except ConfigError:
         return Result("llm router", NOT_CONFIGURED, "settings.yaml invalid (see above)")
     registry = create_fake_registry()[0]
-    allow = settings.router.allow_risky
     try:
-        toolset = build_toolset(registry, extras=True, allow_risky=allow)
+        toolset = build_toolset(registry, search=True, images=True)
     except ValueError as exc:  # two actions in one group disagree on a parameter
         return Result("llm router", FAIL, f"tool schema: {exc}")
     offered = toolset.intents()
     if offered & EXCLUDED_ACTIONS:
         return Result("llm router", FAIL, "a pointer primitive is exposed to the LLM")
     risky = sorted(a for a in offered if registry.is_risky(a))
-    if risky and not allow:
+    if risky:
         return Result("llm router", FAIL, f"risky actions exposed to the LLM: {risky}")
     chain = settings.enabled_providers()
     detail = (
-        f"{len(toolset.tools)} tools; risky via LLM: "
-        f"{'confirmation only' if allow else 'never (exact phrase only)'}; chain: "
-        f"{' -> '.join(chain) if chain else 'none (fixed commands only)'}"
+        f"{len(toolset.tools)} tools (with search + images); risky actions never offered; "
+        f"chain: {' -> '.join(chain) if chain else 'none (fixed commands only)'}"
     )
-    if not chain:
-        return Result("llm router", NOT_CONFIGURED, detail)
-    return Result("llm router", PASS, detail)
+    return Result("llm router", PASS if chain else NOT_CONFIGURED, detail)
 
 
 def check_assistant(settings_path: Path | None = None, env_path: Path | None = None) -> Result:
-    """Gemini extras (web search, images, code analysis): config only, no network call."""
+    """Router tools run by our code: web_search (Tavily) and generate_image (Cloudflare FLUX).
+    Config only; reachability is check_reachability."""
     from grace.config import ConfigError, load_settings
 
     try:
         settings = load_settings(settings_path, env_path)
     except ConfigError:
-        return Result("gemini extras", NOT_CONFIGURED, "settings.yaml invalid (see above)")
-    if settings.demo_mode:
-        return Result("gemini extras", NOT_CONFIGURED, "demo_mode: no cloud calls")
-    if not settings.api_key("gemini"):
-        return Result("gemini extras", NOT_CONFIGURED, "GEMINI_API_KEY not set in .env")
-    g = settings.gemini
-    extras = [n for n, on in (("web search", g.web_search), ("images", g.image_generation)) if on]
-    detail = f"{g.model}: code analysis"
-    if extras:
-        detail += f"; {' + '.join(extras)} need a billing-enabled key"
-    return Result("gemini extras", PASS, detail)
+        return Result("router tools", NOT_CONFIGURED, "settings.yaml invalid (see above)")
+    have = []
+    if settings.search.enabled and settings.secret("tavily"):
+        have.append("web_search: tavily")
+    if (
+        settings.images.enabled
+        and settings.secret("cloudflare_account_id")
+        and settings.secret("cloudflare_api_token")
+    ):
+        have.append(f"generate_image: cloudflare {settings.images.model.rsplit('/', 1)[-1]}")
+    if not have:
+        why = "TAVILY_API_KEY and CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN not set in .env"
+        return Result("router tools", NOT_CONFIGURED, why)
+    return Result("router tools", PASS, "; ".join(have))
 
 
-def check_llama_server(
+def _reach_provider(name: str, base_url: str, key: str, get=None) -> Result:  # noqa: ANN001
+    """GET {base_url}/models: authenticated, spends no tokens or requests of chat quota."""
+    import httpx
+
+    get = get or httpx.get
+    try:
+        response = get(
+            base_url.rstrip("/") + "/models",
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=REACH_TIMEOUT_S,
+        )
+    except httpx.HTTPError as exc:
+        return Result(f"reach {name}", WARN, f"not reachable ({type(exc).__name__})")
+    if response.status_code == 200:
+        return Result(f"reach {name}", PASS, "key accepted (model list)")
+    if response.status_code in (401, 403):
+        return Result(f"reach {name}", WARN, f"key rejected (HTTP {response.status_code})")
+    return Result(f"reach {name}", WARN, f"HTTP {response.status_code}")
+
+
+def check_reachability(
     settings_path: Path | None = None, env_path: Path | None = None
 ) -> list[Result]:
-    """Local LLM: binary, GGUF (sha256, cached) and whether llama-server answers. A problem is a
-    FAIL in demo mode (local is the only provider) and a WARN otherwise (the chain falls back)."""
-    from grace.intent.local_llm import find_binary, is_up
-    from grace.models import LLM_GGUF, by_path, model_path, resolve, verified
+    """Each configured cloud service answers an authenticated request that spends no quota:
+    the model list (groq, gemini, openrouter), Cloudflare's token verify, Tavily's usage.
+    Problems are WARN: cloud services are optional and the app degrades without them."""
+    from grace.intent.images import CloudflareFlux
+    from grace.intent.search import TavilySearch
 
     settings = _load_settings_quietly(settings_path, env_path)
     if settings is None:
-        return [Result("llama-server", NOT_CONFIGURED, "settings.yaml invalid (see above)")]
-    local = settings.router.local
-    if "local" not in settings.enabled_providers():
-        why = "router.local.enabled is false (scripts/run_llama_server.ps1 starts it)"
-        if "local" not in settings.provider_order():
-            why = "local not in router.provider_order"
-        return [Result("llama-server", NOT_CONFIGURED, why)]
-    bad = FAIL if settings.demo_mode else WARN
+        return [Result("reach providers", NOT_CONFIGURED, "settings.yaml invalid (see above)")]
     results = []
-    gguf = resolve(local.gguf)
-    pinned = by_path(LLM_GGUF) if gguf == model_path(LLM_GGUF) else None  # else a custom GGUF
-    if not gguf.is_file():
-        hint = "uv run python scripts/fetch_models.py --llm --only-llm"
-        results.append(Result(f"model {gguf.name}", bad, f"missing: {hint}"))
-    elif pinned is None:
-        results.append(Result(f"model {gguf.name}", PASS, "custom model (hash not pinned)"))
-    elif verified(gguf, pinned.sha256):
-        results.append(Result(f"model {gguf.name}", PASS, "hash ok"))
-    else:
-        results.append(Result(f"model {gguf.name}", FAIL, "hash mismatch"))
-    binary = find_binary(local.binary)
-    up, detail = is_up(local.base_url)
-    if up:
-        results.append(Result("llama-server", PASS, detail))
-    elif binary is None:
-        results.append(Result("llama-server", bad, "not installed: winget install ggml.llamacpp"))
-    else:
-        results.append(
-            Result("llama-server", bad, f"{detail}; start it: scripts/run_llama_server.ps1")
-        )
-    return results
+    for provider in settings.enabled_providers():
+        endpoint = settings.router.endpoint(provider)
+        results.append(_reach_provider(provider, endpoint.base_url, settings.api_key(provider)))
+    account = settings.secret("cloudflare_account_id")
+    token = settings.secret("cloudflare_api_token")
+    if account and token:
+        ok, detail = CloudflareFlux(account, token, registry=None).check()
+        results.append(Result("reach cloudflare", PASS if ok else WARN, detail))
+    tavily = settings.secret("tavily")
+    if tavily:
+        ok, detail = TavilySearch(tavily).check()
+        results.append(Result("reach tavily", PASS if ok else WARN, detail))
+    return results or [Result("reach providers", NOT_CONFIGURED, "no cloud keys in .env")]
 
 
 def check_gestures(settings_path: Path | None = None, env_path: Path | None = None) -> Result:
@@ -693,7 +706,7 @@ def _check_moonshine(arch: str) -> Result:
 # ---------------------------------------------------------------- runner
 
 
-def run_checks(hardware: bool = True) -> list[Result]:
+def run_checks(hardware: bool = True, network: bool = True) -> list[Result]:
     checks: list[Callable[[], Result | list[Result]]] = [
         check_python,
         check_windows_build,
@@ -720,7 +733,9 @@ def run_checks(hardware: bool = True) -> list[Result]:
             check_volume,
             check_brightness,
         ]
-    checks += [check_models, check_env, check_settings, check_llama_server, check_not_built]
+    checks += [check_models, check_env, check_settings, check_not_built]
+    if network:
+        checks.append(check_reachability)
 
     results: list[Result] = []
     for check in checks:
@@ -755,10 +770,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip microphone, camera, volume and brightness checks",
     )
+    parser.add_argument(
+        "--no-network",
+        action="store_true",
+        help="skip the provider reachability checks (model list, token verify, usage)",
+    )
     parser.add_argument("--json", action="store_true", help="print results as JSON")
     args = parser.parse_args(argv)
 
-    results = run_checks(hardware=not args.no_hardware)
+    results = run_checks(hardware=not args.no_hardware, network=not args.no_network)
     if args.json:
         print(json.dumps([r.__dict__ for r in results], indent=2))
     else:
