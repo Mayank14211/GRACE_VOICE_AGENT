@@ -109,7 +109,7 @@ def test_app_intents(agent) -> None:
     a, b = agent
     b.clipboard.text = "print(1)"
     a._process_command("debug this code")
-    assert a.tts.spoken[-1] == "Code analysis needs a GEMINI_API_KEY in the .env file."
+    assert a.tts.spoken[-1] == "Code analysis needs a Groq or OpenRouter key in the .env file."
     a.extras = FakeExtras()
     a._process_command("debug this code")
     assert a.tts.spoken[-1] == "review of ```\nprint(1)\n```"
@@ -129,7 +129,7 @@ class FakeExtras:
         self.searched.append(query)
         return ExtraResult("It is sunny. Twenty degrees. Light wind.", sources=[("S", "https://s")])
 
-    def generate_image(self, prompt: str, aspect_ratio: str = "1:1") -> ExtraResult:
+    def generate_image(self, prompt: str) -> ExtraResult:
         return ExtraResult(f"Image of {prompt} saved.")
 
 
@@ -236,7 +236,7 @@ def test_web_search_and_images_from_the_router(agent) -> None:
     a, _ = agent
     a.router = FakeRouter(Intent("app.web_search", {"query": "weather"}, source="router"))
     a._process_command("what's the weather like")
-    assert a.tts.spoken[-1] == "Web search needs a GEMINI_API_KEY in the .env file."
+    assert a.tts.spoken[-1] == "Web search needs a TAVILY_API_KEY in the .env file."
     a.extras = FakeExtras()
     a._process_command("what's the weather like")
     assert a.extras.searched == ["weather"]

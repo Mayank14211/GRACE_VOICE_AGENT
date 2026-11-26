@@ -275,6 +275,7 @@ def _build_voice(
     missing) leaves GRACE running with gestures and hotkeys, and says why."""
     from grace.actions.executor import ExecutorRegistry
     from grace.core.bus import PARTIAL
+    from grace.core.quota import build_governor
     from grace.input.voice import (
         VoiceHooks,
         VoiceUnavailable,
@@ -294,14 +295,23 @@ def _build_voice(
         tts.change_rate(args.speech_rate)
     voice_ref: list[Any] = []
     router_registry = ExecutorRegistry(registry, executor, "router")
-    extras = build_extras(settings, router_registry)
+
+    def quota_warning(key: str, counter: str, fraction: float) -> None:
+        metrics.write("quota_warning", key=key, counter=counter, pct=round(fraction * 100))
+        replied(f"Heads up: {key.split(':')[0]} is at {fraction:.0%} of its free {counter} limit.")
+
+    quota = build_governor(settings, on_warning=quota_warning)
+    extras = build_extras(settings, router_registry, quota=quota)
     router = build_router(
         settings,
         registry,
-        extras=extras is not None and extras.offers_tools,
+        search=extras.offers_search,
+        images=extras.offers_images,
+        quota=quota,
         metrics=metrics,
         on_provider=lambda name: state.update(provider=name),
     )
+    extras.analyst = router  # code analysis runs the chain without Gemini
     r = settings.router
     dialogue = Dialogue(
         max_turns=r.history_turns, memory_reset_s=r.memory_reset_s, followup_s=r.followup_s
@@ -320,12 +330,7 @@ def _build_voice(
         on_end_session=lambda: voice_ref[0].pipeline.end_session() if voice_ref else None,
         on_exit=lambda: runtime_ref[0].request_quit("voice"),
     )
-    if extras is not None:
-        extras.notify = agent._say  # "Searching the web." while a slow tool runs
-    if settings.demo_mode and router.providers:
-        # Demo mode: the local model processes the system prompt + tools once now, so the
-        # first real request hits llama-server's prompt cache.
-        threading.Thread(target=router.warm_up, name="grace-llm-warmup", daemon=True).start()
+    extras.notify = agent._say  # "Searching the web." while a slow tool runs
 
     def on_wake(score: float | None) -> None:
         earcons.play("wake")

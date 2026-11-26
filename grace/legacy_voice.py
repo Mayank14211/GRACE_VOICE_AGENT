@@ -57,9 +57,9 @@ HELP_TEXT = (
     "- Shut down the computer / restart the computer / put the computer to sleep\n"
     "  (these ask for confirmation: say yes or press Ctrl+Alt+Y within 8 seconds)\n"
     "- Follow-ups: 'a bit more', 'less', 'undo that', 'now the brightness', 'make it 30', 'again'\n"
-    "- Anything else goes to the assistant (Groq, Gemini, OpenRouter or the local model):\n"
-    "  questions, several steps at once ('mute and open youtube'), 'search the web for ...',\n"
-    "  'generate an image of ...' (web search and images need a billing-enabled Gemini key)\n"
+    "- Anything else goes to the assistant (Groq, then Gemini, then OpenRouter): questions,\n"
+    "  several steps at once ('mute and open youtube'), 'search the web for ...' (Tavily key),\n"
+    "  'draw a picture of ...' (Cloudflare keys)\n"
     "- After the wake word (a short tone), keep talking: follow-up commands need no wake word\n"
     "  until you pause. 'Stop listening' ends it; 'start over' makes the assistant forget.\n"
     "- Hold Ctrl+Alt+Space to talk without the wake word. Ctrl+Alt+M mic, Ctrl+Alt+G gestures,\n"
@@ -105,7 +105,8 @@ class GraceVoiceAgent:
         """Hardware-backed parts (tts, screen_reader, registry) can be injected; tests pass fakes.
         Anything not injected is created for real. ``router`` (grace.intent.router.Router)
         handles whatever the grammar and follow-ups don't match; None disables that.
-        ``extras`` (GeminiExtras) does web search, images and code analysis; None disables them.
+        ``extras`` (grace.intent.assistant.Extras) runs web search (Tavily), images (Cloudflare
+        FLUX) and code analysis (router without Gemini); None disables them.
         ``on_end_session`` is called for "stop listening" (the voice pipeline closes its
         follow-up window).
         """
@@ -334,14 +335,15 @@ class GraceVoiceAgent:
             self._say("No text is selected. Please select some text first.")
 
     def _code_review(self, code: str, instruction: str) -> str:
-        """Selected code / screen text -> Gemini (user-initiated; the text leaves the machine)."""
+        """Selected code / screen text -> the LLM chain WITHOUT Gemini (user-initiated; the
+        text leaves the machine, but never to Gemini)."""
         if self.extras is None:
-            return "Code analysis needs a GEMINI_API_KEY in the .env file."
+            return "Code analysis needs a Groq or OpenRouter key in the .env file."
         return self.extras.complete(f"```\n{code[:20000]}\n```", instruction=instruction)
 
     def _web_search(self, args: dict[str, Any]) -> None:
         if self.extras is None:
-            self._say("Web search needs a GEMINI_API_KEY in the .env file.")
+            self._say("Web search needs a TAVILY_API_KEY in the .env file.")
             return
         found = self.extras.web_search(str(args.get("query", "")))
         for title, url in found.sources:
@@ -350,11 +352,9 @@ class GraceVoiceAgent:
 
     def _generate_image(self, args: dict[str, Any]) -> None:
         if self.extras is None:
-            self._say("Image generation needs a GEMINI_API_KEY in the .env file.")
+            self._say("Image generation needs the Cloudflare keys in the .env file.")
             return
-        made = self.extras.generate_image(
-            str(args.get("prompt", "")), str(args.get("aspect_ratio", "1:1"))
-        )
+        made = self.extras.generate_image(str(args.get("prompt", "")))
         for path in made.images:
             print(f"  image: {path}")
         self._say(made.text)
