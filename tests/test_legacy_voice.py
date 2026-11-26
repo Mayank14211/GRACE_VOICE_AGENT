@@ -11,7 +11,9 @@ import pytest
 
 from grace import legacy_voice
 from grace.actions import create_fake_registry
-from grace.intent.assistant import AssistantReply
+from grace.intent.assistant import ExtraResult
+from grace.intent.router import RouteResult
+from grace.intent.types import Intent
 
 
 @dataclass
@@ -108,54 +110,196 @@ def test_app_intents(agent) -> None:
     b.clipboard.text = "print(1)"
     a._process_command("debug this code")
     assert a.tts.spoken[-1] == "Code analysis needs a GEMINI_API_KEY in the .env file."
-    a.assistant = FakeAssistant()
+    a.extras = FakeExtras()
     a._process_command("debug this code")
     assert a.tts.spoken[-1] == "review of ```\nprint(1)\n```"
     a._process_command("exit")
     assert a.is_running is False
 
 
-# --------------------------------------------------------------------------- Gemini fallback
-class FakeAssistant:
+# --------------------------------------------------------------------------- router fallback
+class FakeExtras:
     def __init__(self) -> None:
-        self.asked: list[str] = []
-        self.resets = 0
-
-    def ask(self, text: str) -> AssistantReply:
-        self.asked.append(text)
-        return AssistantReply(f"answer to {text}", sources=[("Src", "https://s.example")])
+        self.searched: list[str] = []
 
     def complete(self, prompt: str, *, instruction: str | None = None) -> str:
         return f"review of {prompt}"
 
-    def reset(self) -> None:
-        self.resets += 1
+    def web_search(self, query: str) -> ExtraResult:
+        self.searched.append(query)
+        return ExtraResult("It is sunny. Twenty degrees. Light wind.", sources=[("S", "https://s")])
+
+    def generate_image(self, prompt: str, aspect_ratio: str = "1:1") -> ExtraResult:
+        return ExtraResult(f"Image of {prompt} saved.")
 
 
-def test_unmatched_speech_goes_to_the_assistant(agent) -> None:
+class FakeRouter:
+    """Returns scripted intents; records what it was asked and the context it got."""
+
+    def __init__(self, *intents: Intent, reply: str = "") -> None:
+        self.intents = list(intents)
+        self.reply = reply
+        self.asked: list[str] = []
+        self.lasts: list = []
+
+    def route(self, text, dialogue=None) -> RouteResult:
+        self.asked.append(text)
+        self.lasts.append(dialogue.last() if dialogue is not None else None)
+        if not self.intents:
+            return RouteResult(reply=self.reply or "Sorry.", ok=False)
+        return RouteResult(list(self.intents), provider="fake")
+
+
+def answer(text: str) -> Intent:
+    return Intent("app.answer", {"text": text}, source="router")
+
+
+def test_unmatched_speech_goes_to_the_router(agent) -> None:
     a, b = agent
-    a.assistant = FakeAssistant()
+    a.router = FakeRouter(answer("Paris."))
     a._process_command("what is the capital of France")
-    assert a.assistant.asked == ["what is the capital of France"]
-    assert a.tts.spoken[-1] == "answer to what is the capital of France"
+    assert a.router.asked == ["what is the capital of France"]
+    assert a.tts.spoken[-1] == "Paris."
     a._process_command("volume 40")  # grammar hits never reach the LLM
-    assert a.assistant.asked == ["what is the capital of France"] and b.volume.level == 40
+    assert a.router.asked == ["what is the capital of France"] and b.volume.level == 40
+
+
+def test_without_a_router_unmatched_speech_is_declined(agent) -> None:
+    a, b = agent
+    a._process_command("tell me a joke")
+    assert a.tts.spoken[-1] == "I'm not sure how to help with that."
+
+
+def test_router_failure_reply_is_spoken(agent) -> None:
+    a, _ = agent
+    a.router = FakeRouter(reply="I can't reach an assistant right now.")
+    a._process_command("tell me a joke")
+    assert a.tts.spoken[-1] == "I can't reach an assistant right now."
+
+
+def test_router_intents_run_through_the_registry_in_order(agent) -> None:
+    a, b = agent
+    a.router = FakeRouter(
+        Intent("volume.mute", {"mute": True}, source="router"),
+        Intent("apps.open", {"name": "youtube"}, source="router"),
+    )
+    a._process_command("mute it and put youtube on")
+    assert b.volume.muted is True and b.launcher.urls == ["https://www.youtube.com"]
+    assert a.dialogue.last().intent.name == "apps.open"
+
+
+def test_risky_router_intent_needs_confirmation_and_runs_last(agent) -> None:
+    a, b = agent
+    a.router = FakeRouter(
+        Intent("system.shutdown", source="router"),
+        Intent("volume.set", {"level": 10}, source="router"),
+    )
+    a._process_command("lower the volume and turn everything off for tonight")
+    assert b.volume.level == 10 and b.power.calls == []  # safe one ran, risky one is held
+    assert a.gate.pending is not None and a.gate.pending.name == "system.shutdown"
+    assert "Confirm shutdown" in a.tts.spoken[-1]
+    assert a.dialogue.last().intent.name == "volume.set"  # risky actions are never follow-ups
+    a._process_command("yes")
+    assert b.power.calls == ["shutdown"]
+    assert a.dialogue.last() is None
 
 
 def test_unmatched_speech_cancels_a_pending_risky_action(agent) -> None:
     a, b = agent
-    a.assistant = FakeAssistant()
+    a.router = FakeRouter(answer("Ha."))
     a._process_command("shut down the computer")
     a._process_command("tell me a joke")
     a._process_command("yes")
     assert b.power.calls == []
 
 
-def test_start_over_resets_the_assistant(agent) -> None:
+def test_start_over_resets_the_dialogue(agent) -> None:
     a, _ = agent
-    a.assistant = FakeAssistant()
+    a._process_command("volume 40")
+    assert a.dialogue.last() is not None and a.dialogue.history()
     a._process_command("start over")
-    assert a.assistant.resets == 1
+    assert a.dialogue.last() is None
+    assert [e.user for e in a.dialogue.history()] == ["start over"]
+
+
+def test_exchanges_are_remembered_for_the_router(agent) -> None:
+    a, _ = agent
+    a.router = FakeRouter(answer("Paris."))
+    a._process_command("what is the capital of France")
+    a._process_command("volume 40")
+    [first, second] = a.dialogue.history()
+    assert (first.user, first.grace) == ("what is the capital of France", "Paris.")
+    assert (second.user, second.grace) == ("volume 40", "Volume set to 40 percent.")
+
+
+def test_web_search_and_images_from_the_router(agent) -> None:
+    a, _ = agent
+    a.router = FakeRouter(Intent("app.web_search", {"query": "weather"}, source="router"))
+    a._process_command("what's the weather like")
+    assert a.tts.spoken[-1] == "Web search needs a GEMINI_API_KEY in the .env file."
+    a.extras = FakeExtras()
+    a._process_command("what's the weather like")
+    assert a.extras.searched == ["weather"]
+    assert a.tts.spoken[-1] == "It is sunny. Twenty degrees."  # two sentences at most
+    a.router = FakeRouter(Intent("app.generate_image", {"prompt": "a cat"}, source="router"))
+    a._process_command("draw me a cat")
+    assert a.tts.spoken[-1] == "Image of a cat saved."
+
+
+# --------------------------------------------------------------------------- follow-ups
+def test_followups_after_a_grammar_command(agent) -> None:
+    a, b = agent
+    a.router = FakeRouter(answer("unused"))
+    a._process_command("volume 40")
+    a._process_command("a bit more")
+    assert b.volume.level == 45
+    a._process_command("now the brightness")
+    assert b.brightness.level == 55  # brightness.step +5 from the fake's 50
+    a._process_command("undo that")
+    assert b.brightness.level == 50
+    assert a.router.asked == []  # all resolved without an LLM
+
+
+def test_undo_that_restores_the_value_a_set_replaced(agent) -> None:
+    a, b = agent
+    b.volume.level = 70
+    a._process_command("volume 20")
+    a._process_command("undo that")
+    assert b.volume.level == 70
+    a._process_command("undo that")  # undoing the undo
+    assert b.volume.level == 20
+
+
+def test_plain_undo_is_still_ctrl_z(agent) -> None:
+    a, b = agent
+    a._process_command("volume 20")
+    a._process_command("undo")
+    assert b.volume.level == 20 and ("hotkey", "ctrl", "z") in b.input.calls
+
+
+def test_undo_that_without_a_reversible_action_is_ctrl_z(agent) -> None:
+    a, b = agent
+    a._process_command("type hello")
+    a._process_command("undo that")
+    assert ("hotkey", "ctrl", "z") in b.input.calls
+
+
+def test_unresolved_followup_goes_to_the_router_with_the_last_action(agent) -> None:
+    a, _ = agent
+    a.router = FakeRouter(answer("Which one?"))
+    a._process_command("volume 40")
+    a._process_command("make the second one louder")
+    assert a.router.asked == ["make the second one louder"]
+    assert a.router.lasts[0].intent.name == "volume.set"
+
+
+def test_risky_actions_are_never_repeated(agent) -> None:
+    a, b = agent
+    a.router = FakeRouter(answer("No."))
+    a._process_command("shut down the computer")
+    a._process_command("yes")
+    a._process_command("again")
+    assert b.power.calls == ["shutdown"] and a.router.asked == ["again"]
 
 
 # --------------------------------------------------------------------------- from the pipeline

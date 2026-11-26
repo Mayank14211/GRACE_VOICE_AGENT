@@ -132,7 +132,8 @@ def run(settings: Settings, args: argparse.Namespace) -> int:
     app = _create_qt_app(rt.overlay and not args.no_overlay)
 
     bus = EventBus()
-    provider = "gemini" if "gemini" in settings.enabled_providers() else "offline"
+    enabled = settings.enabled_providers()
+    provider = enabled[0] if enabled else "offline"  # the chip shows the one that last answered
     state = AppState(bus, max_turns=rt.history_turns, mic_on=rt.mic_on_at_start, provider=provider)
     metrics = (
         MetricsLog(session_path(), secrets=settings.secret_values())
@@ -280,7 +281,10 @@ def _build_voice(
         build_voice_worker,
         stt_event_fields,
     )
-    from grace.legacy_voice import GraceVoiceAgent, build_assistant
+    from grace.intent.assistant import build_extras
+    from grace.intent.dialogue import Dialogue
+    from grace.intent.router import build_router
+    from grace.legacy_voice import GraceVoiceAgent
     from tts import TextToSpeech
 
     tts = TextToSpeech()
@@ -289,12 +293,26 @@ def _build_voice(
     if args.speech_rate != 170:
         tts.change_rate(args.speech_rate)
     voice_ref: list[Any] = []
-    assistant = build_assistant(settings, ExecutorRegistry(registry, executor, "router"))
+    router_registry = ExecutorRegistry(registry, executor, "router")
+    extras = build_extras(settings, router_registry)
+    router = build_router(
+        settings,
+        registry,
+        extras=extras is not None and extras.offers_tools,
+        metrics=metrics,
+        on_provider=lambda name: state.update(provider=name),
+    )
+    r = settings.router
+    dialogue = Dialogue(
+        max_turns=r.history_turns, memory_reset_s=r.memory_reset_s, followup_s=r.followup_s
+    )
     agent = GraceVoiceAgent(
         confirm_hotkey=settings.hotkeys.confirm,
         registry=ExecutorRegistry(registry, executor, "grammar"),
         tts=tts,
-        assistant=assistant,
+        router=router,
+        extras=extras,
+        dialogue=dialogue,
         wake_word=args.wake_word or settings.runtime.wake_word,
         on_heard=heard,
         on_reply=replied,
@@ -302,8 +320,12 @@ def _build_voice(
         on_end_session=lambda: voice_ref[0].pipeline.end_session() if voice_ref else None,
         on_exit=lambda: runtime_ref[0].request_quit("voice"),
     )
-    if assistant is not None:
-        assistant.notify = agent._say  # "Searching the web." while a slow tool runs
+    if extras is not None:
+        extras.notify = agent._say  # "Searching the web." while a slow tool runs
+    if settings.demo_mode and router.providers:
+        # Demo mode: the local model processes the system prompt + tools once now, so the
+        # first real request hits llama-server's prompt cache.
+        threading.Thread(target=router.warm_up, name="grace-llm-warmup", daemon=True).start()
 
     def on_wake(score: float | None) -> None:
         earcons.play("wake")

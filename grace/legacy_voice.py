@@ -1,8 +1,13 @@
-"""Voice agent: what GRACE does with a transcribed utterance (grammar, Gemini, TTS replies).
+"""Voice agent: what GRACE does with a transcribed utterance (grammar, router, TTS replies).
 
 Moved here from main.py in S05. Since S06 it no longer listens: grace/input/voice.py owns the
 microphone, wake word, follow-up window and push-to-talk, and calls ``handle_utterance`` on the
-intent thread with each final transcript. S07 replaces the Gemini-only fallback with the router.
+intent thread with each final transcript.
+
+    transcript -> grammar.parse()            fixed commands (never an LLM)
+               -> resolve_followup()         "a bit more", "undo that", "now the brightness"
+               -> router.route()             LLM provider chain (S07) -> validated Intents
+               -> app handler | dispatcher   (registry, confirmation gate for risky intents)
 
 Every command goes through grace.intent.grammar (whole-phrase grammar) and the action registry.
 In the runtime the registry is an ``ExecutorRegistry``, so voice actions run on the same executor
@@ -19,7 +24,9 @@ from typing import Any
 
 from grace.actions import create_registry
 from grace.actions.confirmation import ConfirmationGate, Dispatcher
+from grace.intent.dialogue import READ_BEFORE_SET, Dialogue, is_undo_phrase, resolve_followup
 from grace.intent.grammar import Grammar, default_grammar
+from grace.intent.router import spoken
 from grace.intent.types import Intent
 
 # Punctuation is only dropped together with a trailing "execute": "type Hello!" keeps its "!".
@@ -49,10 +56,12 @@ HELP_TEXT = (
     "- Take a screenshot / read the screen / read the selection / analyze code / debug code\n"
     "- Shut down the computer / restart the computer / put the computer to sleep\n"
     "  (these ask for confirmation: say yes or press Ctrl+Alt+Y within 8 seconds)\n"
-    "- Anything else goes to Gemini (needs GEMINI_API_KEY): questions, 'search the web for ...',\n"
-    "  'generate an image of ...', or several steps at once ('mute and open youtube')\n"
+    "- Follow-ups: 'a bit more', 'less', 'undo that', 'now the brightness', 'make it 30', 'again'\n"
+    "- Anything else goes to the assistant (Groq, Gemini, OpenRouter or the local model):\n"
+    "  questions, several steps at once ('mute and open youtube'), 'search the web for ...',\n"
+    "  'generate an image of ...' (web search and images need a billing-enabled Gemini key)\n"
     "- After the wake word (a short tone), keep talking: follow-up commands need no wake word\n"
-    "  until you pause. 'Stop listening' ends it; 'start over' makes Gemini forget.\n"
+    "  until you pause. 'Stop listening' ends it; 'start over' makes the assistant forget.\n"
     "- Hold Ctrl+Alt+Space to talk without the wake word. Ctrl+Alt+M mic, Ctrl+Alt+G gestures,\n"
     "  Ctrl+Alt+Q stops everything.\n"
     "- Exit / quit / help"
@@ -83,7 +92,9 @@ class GraceVoiceAgent:
         grammar: Grammar | None = None,
         tts: Any = None,
         screen_reader: Any = None,
-        assistant: Any = None,
+        router: Any = None,
+        extras: Any = None,
+        dialogue: Dialogue | None = None,
         wake_word: str = "listen",
         on_heard: Callable[[str], None] = _noop,
         on_reply: Callable[[str], None] = _noop,
@@ -92,9 +103,11 @@ class GraceVoiceAgent:
         on_exit: Callable[[], None] | None = None,
     ) -> None:
         """Hardware-backed parts (tts, screen_reader, registry) can be injected; tests pass fakes.
-        Anything not injected is created for real. ``assistant`` (GeminiAssistant) answers
-        whatever the grammar doesn't match; None disables that. ``on_end_session`` is called for
-        "stop listening" (the voice pipeline closes its follow-up window).
+        Anything not injected is created for real. ``router`` (grace.intent.router.Router)
+        handles whatever the grammar and follow-ups don't match; None disables that.
+        ``extras`` (GeminiExtras) does web search, images and code analysis; None disables them.
+        ``on_end_session`` is called for "stop listening" (the voice pipeline closes its
+        follow-up window).
         """
         if tts is None:
             from tts import TextToSpeech
@@ -113,7 +126,10 @@ class GraceVoiceAgent:
         self.confirm_hotkey = confirm_hotkey
         self.gate = ConfirmationGate(self.registry, say=self._say, confirm_hotkey=confirm_hotkey)
         self.dispatcher = Dispatcher(self.registry, self.gate, say=self._say)
-        self.assistant = assistant
+        self.router = router
+        self.extras = extras
+        self.dialogue = dialogue if dialogue is not None else Dialogue()
+        self._replies: list[str] | None = None  # what GRACE says during the current command
         self._on_heard = on_heard
         self._on_reply = on_reply
         self._on_mode = on_mode
@@ -140,9 +156,17 @@ class GraceVoiceAgent:
             "app.end_session": self._end_session,
             "app.reset_conversation": self._reset_conversation,
         }
+        # App intents with arguments (from the router).
+        self._arg_handlers: dict[str, Callable[[dict[str, Any]], None]] = {
+            "app.answer": lambda args: self._say(str(args.get("text", ""))),
+            "app.web_search": self._web_search,
+            "app.generate_image": self._generate_image,
+        }
 
     # -- feedback -------------------------------------------------------------------------------
     def _say(self, message: str) -> None:
+        if self._replies is not None:
+            self._replies.append(message)
         print(f"GRACE: {message}")
         self._on_reply(message)
         self.tts.speak_async(message)
@@ -171,45 +195,85 @@ class GraceVoiceAgent:
         self._say("Okay. Say the wake word when you need me.")
 
     def _reset_conversation(self) -> None:
-        if self.assistant is not None:
-            self.assistant.reset()
+        self.dialogue.reset()
         self._say("Okay, starting a new conversation.")
 
     # -- command routing ------------------------------------------------------------------------
     def _process_command(self, command: str) -> Any:
-        """Grammar -> Intent -> app handler or dispatcher (registry + confirmation gate)."""
+        """Grammar -> follow-up -> router; the exchange is remembered for the next request."""
         print(f"Processing command: '{command}'")
         self.command_history.append(command)
         text = strip_execute_word(command)
+        self._replies = []
+        try:
+            return self._route(text)
+        finally:
+            replies, self._replies = self._replies, None
+            self.dialogue.add(text, " ".join(replies))
+
+    def _route(self, text: str) -> Any:
         intent = self.grammar.parse(text)
+        normalized = self.grammar.normalize(text)
+        # "undo that" means "reverse the last change" when there is one; otherwise Ctrl+Z.
+        if intent is None or is_undo_phrase(normalized):
+            followup = resolve_followup(
+                normalized,
+                self.dialogue.last(),
+                is_risky=self.registry.is_risky,
+                steps=self.grammar.steps,
+                scroll=self.grammar.scroll,
+            )
+            intent = followup or intent
         if intent is None:
-            return self._ask_assistant(text)
+            return self._ask_router(text)
         return self._handle_intent(intent)
 
-    def _ask_assistant(self, text: str) -> Any:
-        """Unmatched speech -> Gemini (answers, web search, images, tool calls)."""
+    def _ask_router(self, text: str) -> Any:
+        """Unmatched speech -> LLM router -> validated intents (risky ones via the gate)."""
         if self.gate.pending is not None:
             self.gate.cancel()  # anything else abandons a pending risky action
-        if self.assistant is None:
+        if self.router is None:
             self._say("I'm not sure how to help with that.")
             return None
-        reply = self.assistant.ask(text)
-        for title, url in reply.sources:
-            print(f"  source: {title} <{url}>")
-        for path in reply.images:
-            print(f"  image: {path}")
-        self._say(reply.text)
-        return reply
+        result = self.router.route(text, self.dialogue)
+        if not result.intents:
+            self._say(result.reply)
+            return result
+        # A risky intent waits for confirmation, and any later command would cancel it, so it
+        # runs last (and there is at most one).
+        safe = [i for i in result.intents if not self.registry.is_risky(i.name)]
+        risky = [i for i in result.intents if self.registry.is_risky(i.name)][:1]
+        for intent in safe + risky:
+            self._handle_intent(intent)
+        return result
 
     def _handle_intent(self, intent: Intent) -> Any:
         print(f"Intent: {intent.name} {intent.args}")
         handler = self._app_handlers.get(intent.name)
-        if handler is not None:
+        arg_handler = self._arg_handlers.get(intent.name)
+        if handler is not None or arg_handler is not None:
             if self.gate.pending is not None:
                 self.gate.cancel()
-            handler()
+            if arg_handler is not None:
+                arg_handler(dict(intent.args))
+            elif handler is not None:
+                handler()
             return None
-        return self.dispatcher.handle(intent)
+        before = self._read_before(intent)
+        result = self.dispatcher.handle(intent)  # also app.confirm / app.cancel
+        followable = intent.name in self.registry and not self.registry.is_risky(intent.name)
+        if result is not None and result.ok and followable:
+            self.dialogue.record(intent, before)
+        return result
+
+    def _read_before(self, intent: Intent) -> dict[str, Any]:
+        """The value a `.set` replaces, so "undo that" can put it back."""
+        reader = READ_BEFORE_SET.get(intent.name)
+        if reader is None or reader not in self.registry:
+            return {}
+        result = self.registry.execute(reader)
+        level = result.data.get("level") if result.ok else None
+        return {"level": level} if level is not None else {}
 
     def _process_dictation(self, text: str) -> None:
         """Dictation mode: type each finished sentence until the whole phrase "stop dictation".
@@ -271,9 +335,29 @@ class GraceVoiceAgent:
 
     def _code_review(self, code: str, instruction: str) -> str:
         """Selected code / screen text -> Gemini (user-initiated; the text leaves the machine)."""
-        if self.assistant is None:
+        if self.extras is None:
             return "Code analysis needs a GEMINI_API_KEY in the .env file."
-        return self.assistant.complete(f"```\n{code[:20000]}\n```", instruction=instruction)
+        return self.extras.complete(f"```\n{code[:20000]}\n```", instruction=instruction)
+
+    def _web_search(self, args: dict[str, Any]) -> None:
+        if self.extras is None:
+            self._say("Web search needs a GEMINI_API_KEY in the .env file.")
+            return
+        found = self.extras.web_search(str(args.get("query", "")))
+        for title, url in found.sources:
+            print(f"  source: {title} <{url}>")
+        self._say(spoken(found.text) or found.text)
+
+    def _generate_image(self, args: dict[str, Any]) -> None:
+        if self.extras is None:
+            self._say("Image generation needs a GEMINI_API_KEY in the .env file.")
+            return
+        made = self.extras.generate_image(
+            str(args.get("prompt", "")), str(args.get("aspect_ratio", "1:1"))
+        )
+        for path in made.images:
+            print(f"  image: {path}")
+        self._say(made.text)
 
     def _analyze(self, selection: bool) -> None:
         try:
@@ -321,27 +405,3 @@ class GraceVoiceAgent:
     def _handle_help_command(self) -> None:
         print(HELP_TEXT)
         self.tts.speak(HELP_TEXT)
-
-
-def build_assistant(settings: Any, registry: Any) -> Any:
-    """GeminiAssistant from settings, or None when Gemini has no key / is disabled."""
-    if "gemini" not in settings.enabled_providers():
-        return None
-    from grace.intent.assistant import GeminiAssistant
-    from grace.intent.providers import GeminiClient
-
-    g = settings.gemini
-    client = GeminiClient(
-        settings.api_key("gemini"), timeout_s=g.timeout_s, max_retries=settings.router.max_retries
-    )
-    return GeminiAssistant(
-        client,
-        registry,
-        model=g.model,
-        image_model=g.image_model,
-        web_search=g.web_search,
-        image_generation=g.image_generation,
-        thinking_level=g.thinking_level,
-        image_timeout_s=g.image_timeout_s,
-        memory_reset_s=g.memory_reset_s,
-    )

@@ -1,22 +1,22 @@
-"""Gemini assistant: tool loop, safety exclusions, search, images, memory. No network."""
+"""Gemini extras: web search, image generation, code analysis. No network.
+
+Conversation and tool calling moved to the router (tests/test_router.py).
+"""
 
 from __future__ import annotations
 
 import base64
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from grace.actions import create_fake_registry
-from grace.intent.assistant import (
-    SYSTEM_INSTRUCTION,
-    GeminiAssistant,
-    registry_tools,
-    to_gemini_schema,
-)
+from grace.config import load_settings
+from grace.intent.assistant import GeminiExtras, build_extras
 from grace.intent.providers import Interaction, ProviderUnavailableError, QuotaExceededError
+
+KEY = "AI" + "za" + "FAKE-KEY-FOR-TESTS-ONLY-0123456789"  # assembled: not flagged as a secret
 
 
 def text(t: str, id_: str = "i") -> Interaction:
@@ -25,17 +25,8 @@ def text(t: str, id_: str = "i") -> Interaction:
     )
 
 
-def calls(*fns: tuple[str, dict], id_: str = "c") -> Interaction:
-    steps = [{"type": "thought", "signature": "s"}]
-    steps += [
-        {"type": "function_call", "id": f"call{i}", "name": n, "arguments": a}
-        for i, (n, a) in enumerate(fns)
-    ]
-    return Interaction(id_, "requires_action", steps)
-
-
 class FakeClient:
-    """Answers each create() from a script: an Interaction, an exception, or a callable(body)."""
+    """Answers each create() from a script: an Interaction or an exception."""
 
     def __init__(self, *script: Any) -> None:
         self.script = list(script)
@@ -48,17 +39,7 @@ class FakeClient:
         item = self.script.pop(0)
         if isinstance(item, Exception):
             raise item
-        if isinstance(item, Callable):
-            return item(body)
         return item
-
-
-class Clock:
-    def __init__(self) -> None:
-        self.now = 100.0
-
-    def __call__(self) -> float:
-        return self.now
 
 
 @pytest.fixture
@@ -67,135 +48,8 @@ def setup(tmp_path: Path):
     return registry, b, tmp_path
 
 
-def make(registry, client, tmp_path, **kw) -> GeminiAssistant:
-    return GeminiAssistant(client, registry, image_dir=tmp_path, now=lambda: 0.0, **kw)
-
-
-# --------------------------------------------------------------------------- tool schema
-def test_risky_and_path_actions_are_never_tools(setup) -> None:
-    registry, _, _ = setup
-    tools, names = registry_tools(registry)
-    actions = set(names.values())
-    assert not {"system.shutdown", "system.restart", "system.sleep"} & actions
-    assert "screen.show_image" not in actions
-    assert {"volume.set", "apps.open", "input.type", "input.hotkey"} <= actions
-    assert all("." not in t["name"] for t in tools)
-
-
-def test_schema_conversion_keeps_only_supported_keywords(setup) -> None:
-    registry, _, _ = setup
-    allowed = {
-        "type",
-        "description",
-        "enum",
-        "properties",
-        "required",
-        "items",
-        "minimum",
-        "maximum",
-    }
-
-    def check(schema: dict) -> None:
-        assert set(schema) <= allowed, schema
-        for sub in schema.get("properties", {}).values():
-            check(sub)
-        if "items" in schema:
-            check(schema["items"])
-
-    for tool in registry_tools(registry)[0]:
-        if "parameters" in tool:
-            assert tool["parameters"]["type"] == "object"
-            check(tool["parameters"])
-    click = to_gemini_schema(registry.spec("input.click").args_model.model_json_schema())
-    assert click["properties"]["button"]["enum"] == ["left", "right", "middle"]
-
-
-def test_body_is_stable_across_calls(setup) -> None:
-    registry, _, tmp = setup
-    client = FakeClient(text("a", "i1"), text("b", "i2"))
-    a = make(registry, client, tmp)
-    a.ask("one")
-    a.ask("two")
-    first, second = client.bodies
-    assert first["system_instruction"] == second["system_instruction"] == SYSTEM_INSTRUCTION
-    assert first["tools"] == second["tools"]
-    assert {"web_search", "generate_image"} <= set(a.tool_names)
-
-
-# --------------------------------------------------------------------------- answers + tools
-def test_plain_answer_and_memory(setup) -> None:
-    registry, _, tmp = setup
-    client = FakeClient(text("84.", "i1"), text("28.", "i2"))
-    a = make(registry, client, tmp)
-    assert a.ask("what is 12 times 7").text == "84."
-    assert a.ask("and divided by 3").text == "28."
-    assert "previous_interaction_id" not in client.bodies[0]
-    assert client.bodies[1]["previous_interaction_id"] == "i1"
-
-
-def test_memory_resets_after_idle(setup) -> None:
-    registry, _, tmp = setup
-    clock = Clock()
-    client = FakeClient(text("a", "i1"), text("b", "i2"))
-    a = GeminiAssistant(client, registry, image_dir=tmp, memory_reset_s=60, clock=clock)
-    a.ask("one")
-    clock.now += 61
-    a.ask("two")
-    assert "previous_interaction_id" not in client.bodies[1]
-
-
-def test_tool_calls_run_through_registry(setup) -> None:
-    registry, b, tmp = setup
-    client = FakeClient(
-        calls(("volume_set", {"level": 30}), ("apps_open", {"name": "notepad"}), id_="c1"),
-        text("Done: volume 30 and Notepad.", "i2"),
-    )
-    reply = make(registry, client, tmp).ask("volume thirty and open notepad")
-    assert b.volume.level == 30 and b.launcher.launched == ["notepad"]
-    assert reply.actions == ["volume.set", "apps.open"] and reply.text.startswith("Done")
-    second = client.bodies[1]
-    assert second["previous_interaction_id"] == "c1"
-    assert [r["call_id"] for r in second["input"]] == ["call0", "call1"]
-    assert second["input"][0]["result"] == [{"type": "text", "text": "Volume set to 30 percent."}]
-
-
-def test_only_the_message_goes_back_never_action_data(setup) -> None:
-    registry, b, tmp = setup
-    b.clipboard.text = "my private selection"
-    client = FakeClient(calls(("clipboard_copy", {})), text("Copied."))
-    make(registry, client, tmp).ask("copy that")
-    assert "my private selection" not in str(client.bodies[1])
-
-
-def test_risky_tool_call_is_refused_even_if_the_model_tries(setup) -> None:
-    registry, b, tmp = setup
-    client = FakeClient(calls(("system_shutdown", {})), text("I can't do that."))
-    make(registry, client, tmp).ask("shut it all down")
-    assert b.power.calls == []
-    assert client.bodies[1]["input"][0]["is_error"] is True
-
-
-def test_invalid_tool_args_are_reported_as_errors(setup) -> None:
-    registry, b, tmp = setup
-    client = FakeClient(calls(("input_hotkey", {"keys": ["ctrl", "nope"]})), text("Sorry."))
-    make(registry, client, tmp).ask("press something")
-    assert b.input.calls == []
-    assert client.bodies[1]["input"][0]["is_error"] is True
-
-
-def test_tool_loop_is_bounded(setup) -> None:
-    registry, _, tmp = setup
-    client = FakeClient(*[calls(("volume_get", {})) for _ in range(10)])
-    reply = make(registry, client, tmp, max_tool_rounds=3).ask("loop forever")
-    assert "too many steps" in reply.text
-    assert len(client.bodies) == 4
-
-
-def test_provider_errors_become_spoken_replies(setup) -> None:
-    registry, _, tmp = setup
-    a = make(registry, FakeClient(ProviderUnavailableError("I couldn't reach Gemini.")), tmp)
-    reply = a.ask("hello")
-    assert not reply.ok and reply.text == "I couldn't reach Gemini."
+def make(registry, client, tmp_path, **kw) -> GeminiExtras:
+    return GeminiExtras(client, registry, image_dir=tmp_path, now=lambda: 0.0, **kw)
 
 
 # --------------------------------------------------------------------------- web search
@@ -220,25 +74,29 @@ def test_web_search_uses_grounding_and_collects_sources(setup) -> None:
         ],
     )
     notes: list[str] = []
-    client = FakeClient(
-        calls(("web_search", {"query": "cricket world cup"})), found, text("India.")
-    )
-    reply = make(registry, client, tmp, notify=notes.append).ask("who won the world cup")
-    assert client.bodies[1]["tools"] == [{"type": "google_search"}]
-    assert client.bodies[2]["input"][0]["result"][0]["text"] == "India won."
-    assert reply.sources == [("N", "https://n.example")]
+    client = FakeClient(found)
+    result = make(registry, client, tmp, notify=notes.append).web_search("cricket world cup")
+    assert client.bodies[0]["tools"] == [{"type": "google_search"}]
+    assert client.bodies[0]["input"] == "cricket world cup"
+    assert result.ok and result.text == "India won."
+    assert result.sources == [("N", "https://n.example")]
     assert notes == ["Searching the web."]
 
 
 def test_web_search_without_billing_is_explained(setup) -> None:
     registry, _, tmp = setup
-    client = FakeClient(
-        calls(("web_search", {"query": "news"})),
-        QuotaExceededError("x", billing_required=True),
-        text("I can't search the web right now."),
-    )
-    reply = make(registry, client, tmp).ask("search the news")
-    assert "billing-enabled" in reply.text  # deterministic notice, whatever the model says
+    client = FakeClient(QuotaExceededError("x", billing_required=True))
+    result = make(registry, client, tmp).web_search("news")
+    assert not result.ok and "billing-enabled" in result.text
+
+
+def test_web_search_errors_and_empty_query(setup) -> None:
+    registry, _, tmp = setup
+    a = make(registry, FakeClient(ProviderUnavailableError("I couldn't reach Gemini.")), tmp)
+    assert a.web_search("weather").text == "Web search failed: I couldn't reach Gemini."
+    assert not a.web_search("   ").ok
+    off = make(registry, FakeClient(), tmp, web_search=False)
+    assert not off.web_search("x").ok and off.client.bodies == []
 
 
 # --------------------------------------------------------------------------- images
@@ -255,14 +113,12 @@ def test_generate_image_saves_and_shows(setup) -> None:
             }
         ],
     )
-    client = FakeClient(
-        calls(("generate_image", {"prompt": "a cat", "aspect_ratio": "16:9"})), made, text("Here.")
-    )
-    reply = make(registry, client, tmp, image_model="img-model").ask("draw a cat")
-    [path] = reply.images
+    client = FakeClient(made)
+    result = make(registry, client, tmp, image_model="img-model").generate_image("a cat", "16:9")
+    [path] = result.images
     assert path.read_bytes() == jpeg and path.parent == tmp and path.suffix == ".jpg"
     assert b.launcher.files == [path.resolve()]
-    body, kwargs = client.bodies[1], client.kwargs[1]
+    body, kwargs = client.bodies[0], client.kwargs[0]
     assert body["model"] == "img-model"
     assert body["response_format"] == {
         "type": "image",
@@ -270,23 +126,21 @@ def test_generate_image_saves_and_shows(setup) -> None:
         "aspect_ratio": "16:9",
     }
     assert kwargs["headers"]["Api-Revision"]
+    assert "open on screen" in result.text
 
 
 def test_generate_image_without_billing_is_explained(setup) -> None:
     registry, b, tmp = setup
-    client = FakeClient(
-        calls(("generate_image", {"prompt": "a cat"})),
-        QuotaExceededError("x", billing_required=True),
-        text("Sorry, no image."),
-    )
-    reply = make(registry, client, tmp).ask("draw a cat")
-    assert "billing-enabled" in reply.text and reply.images == [] and b.launcher.files == []
+    client = FakeClient(QuotaExceededError("x", billing_required=True))
+    result = make(registry, client, tmp).generate_image("a cat")
+    assert "billing-enabled" in result.text and result.images == [] and b.launcher.files == []
 
 
-def test_disabled_features_are_not_offered(setup) -> None:
+def test_disabled_features(setup) -> None:
     registry, _, tmp = setup
     a = make(registry, FakeClient(), tmp, web_search=False, image_generation=False)
-    assert not {"web_search", "generate_image"} & set(a.tool_names)
+    assert not a.offers_tools
+    assert not a.generate_image("a cat").ok
 
 
 def test_show_image_only_opens_files_in_grace_folder(setup, tmp_path) -> None:
@@ -299,8 +153,31 @@ def test_show_image_only_opens_files_in_grace_folder(setup, tmp_path) -> None:
     assert b.launcher.files == []
 
 
+# --------------------------------------------------------------------------- code analysis
 def test_complete_is_single_turn_without_tools(setup) -> None:
     registry, _, tmp = setup
     client = FakeClient(text("Looks fine."))
     assert make(registry, client, tmp).complete("code", instruction="review") == "Looks fine."
     assert "tools" not in client.bodies[0] and "previous_interaction_id" not in client.bodies[0]
+    assert client.bodies[0]["system_instruction"] == "review"
+
+
+def test_complete_errors_are_spoken(setup) -> None:
+    registry, _, tmp = setup
+    client = FakeClient(ProviderUnavailableError("I couldn't reach Gemini."))
+    assert make(registry, client, tmp).complete("code") == "I couldn't reach Gemini."
+
+
+# --------------------------------------------------------------------------- building
+def test_build_extras_needs_a_key_and_no_demo_mode(tmp_path: Path) -> None:
+    registry, _ = create_fake_registry()
+    none = load_settings(tmp_path / "none.yaml", tmp_path / ".env", environ={})
+    assert build_extras(none, registry) is None
+    env = tmp_path / ".env"
+    env.write_text(f"GEMINI_API_KEY={KEY}\n")
+    keyed = load_settings(tmp_path / "none.yaml", env, environ={})
+    extras = build_extras(keyed, registry)
+    assert extras is not None and KEY not in repr(extras.client)
+    demo = tmp_path / "demo.yaml"
+    demo.write_text("demo_mode: true\n")
+    assert build_extras(load_settings(demo, env, environ={}), registry) is None  # no cloud
