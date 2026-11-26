@@ -187,4 +187,4 @@ def test_default_order_is_groq_gemini_openrouter(tmp_path: Path) -> None:
     env.write_text(chr(10).join(lines) + chr(10))
     providers = build_chat_providers(load_settings(tmp_path / "none.yaml", env, environ={}))
     assert [p.name for p in providers] == ["groq", "gemini", "openrouter"]
-    assert all(p.timeout_s == 3.0 for p in providers)
+    assert [p.timeout_s for p in providers] == [3.0, 6.0, 3.0]  # gemini: free-tier tail

@@ -312,7 +312,7 @@ def test_router_endpoints_and_timeouts(tmp_path: Path) -> None:
     s = load(tmp_path, "router: {groq: {base_url: 'https://g.example/v1', model: m1}}\n")
     assert s.router.endpoint("groq").model == "m1"
     assert s.router.endpoint("gemini").base_url.endswith("/v1beta/openai/")
-    assert s.router.timeout_s("groq") == 3.0
+    assert (s.router.timeout_s("groq"), s.router.timeout_s("gemini")) == (3.0, 6.0)
     slow = load(tmp_path, "router: {gemini: {base_url: 'https://g', model: m, timeout_s: 6}}\n")
     assert (slow.router.timeout_s("gemini"), slow.router.timeout_s("groq")) == (6.0, 3.0)
     assert s.router.history_turns == 6

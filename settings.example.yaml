@@ -143,7 +143,7 @@ router:
     base_url: https://generativelanguage.googleapis.com/v1beta/openai/
     model: gemini-3.5-flash-lite
     reasoning_effort: low
-    timeout_s: null        # free tier took 1.4-3.5 s here; try 6.0 if it times out
+    timeout_s: 6.0         # the free tier took 1.4-3.5 s here, tail 4-6 s: 3 s missed ~1 in 5
   openrouter:
     base_url: https://openrouter.ai/api/v1
     model: google/gemma-4-26b-a4b-it:free  # must be a ":free" model (zero running cost)

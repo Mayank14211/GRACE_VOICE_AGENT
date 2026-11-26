@@ -273,6 +273,9 @@ def _gemini_endpoint() -> ProviderEndpoint:
         base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         model="gemini-3.5-flash-lite",
         reasoning_effort="low",
+        # The fallback must actually catch requests: on the base machine the free tier took
+        # 1.4-3.5 s (median ~1.6 s) with a tail to 4-6 s, so 3 s timed out ~1 in 5 (S07 evals).
+        timeout_s=6.0,
     )
 
 
