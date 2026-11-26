@@ -32,7 +32,7 @@ GRACE (General-purpose Responsive Assistant for Computer Environment) is an AI-p
 - Python 3.11 (64-bit) — managed by [uv](https://docs.astral.sh/uv/)
 - Microphone and webcam
 - No internet needed for voice: wake word, English speech-to-text and fixed commands run offline
-  (the Gemini assistant and the optional Groq STT need a network)
+  (the assistant, its tools and the optional Groq STT need a network)
 - Tesseract OCR (for screen reading)
 
 ## Installation
@@ -77,7 +77,7 @@ Adding a dependency: confirm a cp311 win_amd64 wheel exists, then
 
 5. Configure (optional; everything has a default):
 ```powershell
-copy .env.example .env                    # API keys: GROQ_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY
+copy .env.example .env                    # API keys: GROQ_API_KEY, GEMINI_API_KEY, ... (all optional)
 copy settings.example.yaml settings.yaml  # hotkeys, thresholds, provider order, inference.threads
 uv run python -m grace --check-config     # shows which providers are enabled, then exits
 ```
@@ -253,66 +253,66 @@ these refer to it. They are resolved without any LLM, so they work offline:
 
 Plain "undo" is always Ctrl+Z. "Undo that" is Ctrl+Z too when the last action can't be reversed.
 
-### Assistant: the LLM router (optional)
+### Assistant: the LLM router (optional, cloud)
 
 Speech that is neither a fixed command nor a follow-up goes to the router
 (`grace/intent/router.py`). It tries the providers in `router.provider_order`, skipping any
-without a key, and turns the model's answer into GRACE actions:
+without a key, and turns the model's tool calls into GRACE actions. There is no local LLM: the
+assistant needs network. Fixed commands, follow-ups, gestures and hotkeys never do.
 
 | Provider (default order) | Model (`router.<provider>.model`) | Needs | Timeout |
 |---|---|---|---|
 | Groq | `openai/gpt-oss-20b` | `GROQ_API_KEY` (free) | 3 s |
-| Gemini (OpenAI endpoint) | `gemini-3.5-flash-lite` | `GEMINI_API_KEY` (free) | 3 s |
+| Gemini (OpenAI endpoint) | `gemini-3.5-flash-lite` | `GEMINI_API_KEY` (free) | 6 s |
 | OpenRouter | `google/gemma-4-26b-a4b-it:free` (must be `:free`) | `OPENROUTER_API_KEY` | 3 s |
-| Local llama-server | Gemma 4 E4B Q4_K_M | `router.local.enabled: true` + llama-server running | 15 s |
 
 - **No crash on any failure.** HTTP 429, a timeout or any error puts that provider in a 60 s
-  cooldown and the next one is tried. If none answers, GRACE says so; fixed commands keep working.
+  cooldown and the next one is tried. A provider whose free quota is used up is skipped too.
+  If none answers, GRACE says so; fixed commands keep working.
+- **Stateless providers, history in GRACE.** The router keeps the last `router.history_turns`
+  (6) exchanges plus the last action and sends them on every call, so a fallback provider
+  continues the same conversation: "What's the capital of Australia?" then "And how many
+  people live there?". "Start over" forgets; after `router.memory_reset_s` (10 min) of silence
+  it forgets by itself.
 - **Validated output.** Every tool call is checked against the action's pydantic model. A bad
-  reply gets one retry, then GRACE asks you to rephrase.
-- **Memory.** The last `router.history_turns` (6) exchanges and the last action are sent with
-  each request: "What's the capital of France?" then "And how many people live there?" works.
-  "Start over" forgets. After `router.memory_reset_s` (10 min) of silence it forgets by itself.
+  reply gets one retry, then the next provider is tried; if all fail, GRACE asks you to rephrase.
 - **Several steps**: "set the sound to thirty and then open notepad" runs both, in order.
 - **Answers** are at most two spoken sentences.
-- **Risky actions**: by default the LLM can't shut down, restart or sleep the computer. It tells
-  you the exact phrase to say. With `router.allow_risky: true` it may propose them, and GRACE
-  still asks "Confirm shutdown? Say yes or press Ctrl+Alt+Y."
+- **Risky actions** (shut down, restart, sleep) are never offered to the LLM. It tells you the
+  exact phrase to say ("shut down the computer"), which then asks for confirmation.
+- **Quotas.** `router.quota` holds each provider's free-tier limits (requests and tokens per
+  minute and per day). GRACE warns at 80 % and skips the provider at 100 % until the window
+  resets. Counts survive restarts (`logs/quota.json`).
 - The provider that answered last is shown on the status chip (`offline` when none did).
-- Gemini's free tier answered in 1.4-3.5 s on the base machine, so the 3 s budget sometimes
-  trips. Groq is the fast primary; give Gemini more room with `router.gemini.timeout_s: 6.0`.
+- Timeouts: 3 s for Groq and OpenRouter, 6 s for Gemini. Gemini's free tier answered in
+  1.4-3.5 s on the base machine with a tail to 4-6 s, so at 3 s the fallback missed about 1
+  request in 5.
+- Groq's free tier allows 8,000 tokens a minute, and each request carries about 1.6k tokens of
+  prompt and tools. So Groq takes about 5 requests a minute; past that the governor sends
+  requests to Gemini.
 
-**Local model (offline / demo mode).** Install llama.cpp (`winget install ggml.llamacpp`), then:
+**Tools run by GRACE's own code** (the model only asks for them):
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\run_llama_server.ps1
-```
-
-The script downloads `models/llm/google_gemma-4-E4B-it-Q4_K_M.gguf` (5.4 GB, sha256-checked)
-the first time. It then starts llama-server with `--jinja` (tool calls), reasoning off and
-`-t <inference.threads>`. Then set `router.local.enabled: true`. `demo_mode: true` pins the
-router to the local model and warms it up at start, so the first request is fast.
-`uv run python -m grace doctor` reports whether llama-server answers.
-`uv run python scripts/bench_threads.py --llm` finds the fastest thread count.
-
-**Gemini extras** (`gemini:` in `settings.yaml`, needs `GEMINI_API_KEY`, off in demo mode):
-
-| Ask | What happens | Gemini tier needed |
+| Ask | Tool | Needs (free) |
 |---|---|---|
-| "Analyze the code" / "Debug this code" | Selected code is reviewed by Gemini | Free |
-| "Search the web for today's weather in Delhi" | Google Search grounding; sources printed in the console | **Billing-enabled key** |
-| "Generate an image of a cat in sunglasses" | Image saved to `Pictures\GRACE` and opened | **Billing-enabled key** |
+| "Search the web for today's weather in Delhi" | `web_search`: Tavily, answer spoken in two sentences, sources printed | `TAVILY_API_KEY` (1,000 searches/month) |
+| "Draw me a picture of a lighthouse at sunset" | `generate_image`: Cloudflare Workers AI FLUX.1 schnell; saved to `Pictures\GRACE` and opened | `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN` (10,000 neurons/day, about 170 images) |
+| "Analyze the code" / "Debug this code" | the router's chain **without Gemini** | `GROQ_API_KEY` or `OPENROUTER_API_KEY` |
 
-- Google gives **no free quota** for search grounding or image generation. On a free key GRACE
-  says so instead of failing silently. Turn them off with `gemini.web_search: false` /
-  `gemini.image_generation: false`.
-- Privacy: what you say to the assistant goes to the cloud provider that answers. Code you ask
-  it to analyze goes to Google. Free-tier inputs may be used to improve the providers' models.
-  The router never sends action data back (clipboard contents, typed text, screen text): it
-  sends only your words and the last action's name. Screen reading (OCR) stays on the machine.
-- Measure it: `uv run python scripts/eval_router.py` runs 20 free-form requests and logs the
-  provider, latency and success (`--providers local` for network off, `--save` writes
-  `docs/results/router.md`).
+- A tool without its key isn't offered to the model, and asking for it says which key is missing.
+- Image prompts asking for sexual content, gore, self-harm or hate are refused on this machine
+  and never sent.
+- Privacy: what you say to the assistant goes to the provider that answers. Search queries go
+  to Tavily and image prompts to Cloudflare. **Screen text and selected code never go to
+  Gemini** (its free tier may use inputs for training). The router never sends action data back
+  (clipboard contents, typed text, screen text): it sends only your words and the last action's
+  name. Screen reading (OCR) stays on the machine.
+- Measure it: `uv run python scripts/eval_router.py --force-429 5` runs 20 free-form requests,
+  including 3 searches and 3 images. The first 5 get a forced HTTP 429 from Groq, so you can
+  see the fallback keep the history. `--offline` simulates no network. `--save` writes
+  `docs/results/router.md`.
+- `uv run python -m grace doctor` checks each configured service with a call that spends no
+  quota: the model list, Cloudflare token verify, and Tavily usage. `--no-network` skips these.
 
 - **Text Input**:
   - "Dictate" - Starts dictation mode
@@ -356,7 +356,8 @@ python test_screen_reader.py
 
 ### Code Analysis
 
-The code analysis feature uses Google's Gemini AI to analyze and debug code:
+The code analysis feature sends the selected code to the assistant (Groq, else OpenRouter;
+never Gemini) to analyze and debug it:
 
 1. First, select the code you want to analyze with your mouse
 2. Then use one of the following commands:
@@ -366,7 +367,7 @@ The code analysis feature uses Google's Gemini AI to analyze and debug code:
 - "Debug code" - Identifies potential errors and suggests fixes
 
 For both commands to work:
-- `GEMINI_API_KEY` must be set in `.env`
+- `GROQ_API_KEY` (or `OPENROUTER_API_KEY`) must be set in `.env`
 - Text must be selected before issuing the command
 
 Example:
@@ -382,7 +383,7 @@ Example:
 - **Installation problems**: Run `tesseract_check.py` to diagnose issues
 
 ### Code Analysis Issues
-- **"Gemini AI not available"**: Check `GEMINI_API_KEY` is set in `.env`
+- **"Code analysis needs a Groq or OpenRouter key"**: set `GROQ_API_KEY` in `.env`
   (`uv run python -m grace --check-config` shows whether the provider is enabled)
 - **No analysis**: Ensure you've selected code before issuing the command
 - **Network errors**: Check your internet connection
@@ -393,7 +394,7 @@ GRACE reads two files from the repository root. Both are git-ignored and both ar
 
 | File | Holds | Template |
 |---|---|---|
-| `.env` | API keys only: `GROQ_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY` | `.env.example` |
+| `.env` | API keys only: `GROQ_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `TAVILY_API_KEY` | `.env.example` |
 | `settings.yaml` | Hotkeys, audio/gesture thresholds, wake word model path, language, `demo_mode`, `inference.threads`, LLM provider order and timeouts | `settings.example.yaml` (every option documented inline) |
 
 - **Every key is optional.** Wake word, English STT, gestures and fixed commands work offline. A
