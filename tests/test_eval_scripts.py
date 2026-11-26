@@ -111,30 +111,42 @@ def test_m5_acceptance_moonshine_median_under_500_ms(capsys: pytest.CaptureFixtu
     assert "**MET**" in out, out
 
 
-def test_llm_summary_takes_medians() -> None:
-    samples = [
-        {"ok": True, "latency_ms": 900, "prompt_per_second": 60, "predicted_per_second": 9},
-        {"ok": True, "latency_ms": 1100, "prompt_per_second": 80, "predicted_per_second": 11},
-        {"ok": False, "error": "timeout"},
-    ]
-    s = bench_threads.llm_summary(samples)
-    assert (s["latency_ms"], s["prompt_tps"], s["gen_tps"]) == (1000, 70, 10)
-    assert (s["ok"], s["n"]) == (2, 3)
-
-
-def test_eval_router_requests_are_free_form_and_report_counts_router_rows() -> None:
+def test_eval_router_requests_are_free_form_with_tools() -> None:
     import eval_router
 
     grammar = default_grammar()
     assert len(eval_router.REQUESTS) == 20
     assert all(grammar.parse(text) is None for text, _ in eval_router.REQUESTS)
+    kinds = [ok for _, ok in eval_router.REQUESTS]
+    assert sum(eval_router.SEARCH <= k for k in kinds) >= 3
+    assert sum(eval_router.IMAGE <= k for k in kinds) >= 3
+    assert all(grammar.parse(t) is not None for t in eval_router.OFFLINE_FIXED if t != "a bit more")
+
+
+def test_eval_router_report_counts_router_rows_and_tools() -> None:
+    import eval_router
+
     rows = [
         eval_router.Row("a", "router", "groq", 400, ["volume.step"], True),
-        eval_router.Row("b", "router", "local", 2000, [], False),
+        eval_router.Row("b", "router", "gemini", 2000, [], False, "groq: QuotaExceededError"),
         eval_router.Row("c", "grammar", "-", 1, ["volume.set"], False),
+        eval_router.Row("d", "router", "groq", 500, ["app.web_search"], True, "", "failed"),
     ]
-    text = eval_router.report(rows, ["groq", "local"])
-    assert (
-        "1/2 router requests succeeded" in text
-        and "| 3 | c | - | 1 | volume.set | grammar |" in text
-    )
+    text = eval_router.report(rows, ["groq", "gemini"], force_429=2)
+    assert "2/3 router requests succeeded" in text and "Tools: 0/1 executor calls ran" in text
+    assert "Requests 1-2: forced HTTP 429" in text
+    assert "| 3 | c | - | 1 | volume.set | - | - | grammar |" in text
+
+
+def test_forced_429_wrapper() -> None:
+    import eval_router
+
+    from grace.intent.fakes import FakeChatProvider, says
+    from grace.intent.providers import QuotaExceededError
+
+    wrapped = eval_router._Forced429(FakeChatProvider("groq", says("hi")))
+    wrapped.remaining = 1
+    with pytest.raises(QuotaExceededError):
+        wrapped.chat([], [], max_tokens=1, temperature=0)
+    wrapped.remaining = 0
+    assert wrapped.chat([], [], max_tokens=1, temperature=0).tool_calls
