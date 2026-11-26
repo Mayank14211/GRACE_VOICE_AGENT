@@ -1,12 +1,13 @@
 """LLM provider clients.
 
-Chat (the router, S07): every provider is an OpenAI-compatible endpoint — Groq, Gemini's OpenAI
-endpoint, OpenRouter and the local llama-server — reached through ONE factory,
+Chat (the router, S07): every provider is an OpenAI-compatible endpoint (Groq, Gemini's OpenAI
+endpoint, OpenRouter), reached through ONE factory,
 ``make_openai_client``, and wrapped in ``OpenAIChatProvider``. Base URLs and model IDs come from
 settings (router.<provider>), never from code.
 
-Gemini extras (web search grounding, image generation, code analysis) use ``GeminiClient`` over
-the Interactions REST API with the pinned httpx: the OpenAI endpoint has no Google Search tool.
+``GeminiClient`` (Interactions REST API, built before S07) is kept for direct Gemini calls; since
+the 2026-11-26 decisions the router does not use it (no Gemini search grounding or image
+generation: they need billing).
 
 Every call has a timeout and a retry limit; failures raise a ProviderError subclass with a
 message that is safe to speak. API keys are sent only in request headers and never appear in
@@ -210,7 +211,6 @@ class GeminiClient:
 
 
 # ============================================================================ chat (router)
-LOCAL_API_KEY = "local"  # llama-server ignores it; the openai SDK needs a non-empty value
 
 
 @dataclass(frozen=True)
@@ -229,7 +229,7 @@ class ChatReply:
     tool_calls: tuple[ToolCall, ...] = ()
     latency_ms: float = 0.0
     usage: Mapping[str, Any] = field(default_factory=dict)
-    timings: Mapping[str, Any] = field(default_factory=dict)  # llama-server only
+    timings: Mapping[str, Any] = field(default_factory=dict)  # provider timing extras, if any
 
 
 class ChatProvider(Protocol):
@@ -384,12 +384,12 @@ def _to_reply(response: Any, latency_ms: float) -> ChatReply:
 def build_chat_providers(
     settings: Any, *, http_client_factory: Callable[[str], httpx.Client] | None = None
 ) -> list[OpenAIChatProvider]:
-    """Providers in settings order, skipping those without a key (or local not enabled)."""
+    """Providers in settings order, skipping those without a key."""
     providers = []
     router = settings.router
     for name in settings.enabled_providers():
         endpoint = router.endpoint(name)
-        key = LOCAL_API_KEY if name == "local" else settings.api_key(name)
+        key = settings.api_key(name)
         if not key:
             continue
         http_client = http_client_factory(name) if http_client_factory else None

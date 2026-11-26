@@ -94,7 +94,7 @@ def test_tool_call_reply_and_request_shape() -> None:
     assert KEY not in repr(provider)
 
 
-def test_plain_text_reply_and_llama_server_timings() -> None:
+def test_plain_text_reply_and_timings() -> None:
     provider, _ = provider_with(
         lambda r, n: completion(
             {"role": "assistant", "content": " Paris. "}, timings={"predicted_per_second": 9.5}
@@ -160,20 +160,24 @@ def test_broken_json_body_is_a_provider_error() -> None:
 # --------------------------------------------------------------------------- from settings
 def test_build_chat_providers_follows_settings(tmp_path: Path) -> None:
     env = tmp_path / ".env"
-    env.write_text(f"GROQ_API_KEY={KEY}\n")
+    env.write_text(f"GROQ_API_KEY={KEY}" + chr(10))
     cfg = tmp_path / "s.yaml"
-    cfg.write_text("router: {provider_order: [local, groq, gemini], local: {enabled: true}}\n")
+    cfg.write_text(
+        "router: {provider_order: [gemini, groq], "
+        "groq: {base_url: 'https://g', model: m, timeout_s: 5}}" + chr(10)
+    )
     providers = build_chat_providers(load_settings(cfg, env, environ={}))
-    assert [p.name for p in providers] == ["local", "groq"]  # gemini has no key
-    local, groq = providers
-    assert (local.timeout_s, groq.timeout_s) == (15.0, 3.0)
-    assert groq.model == "openai/gpt-oss-20b" and local.model == "gemma-4-e4b-it"
-    assert all(KEY not in repr(p) for p in providers)
+    assert [p.name for p in providers] == ["groq"]  # gemini has no key
+    [groq] = providers
+    assert groq.timeout_s == 5.0 and groq.model == "m"
+    assert KEY not in repr(groq)
 
 
-def test_demo_mode_builds_local_only(tmp_path: Path) -> None:
+def test_default_order_is_groq_gemini_openrouter(tmp_path: Path) -> None:
+    gem = "AI" + "za" + "FAKE-KEY-FOR-TESTS-ONLY-0123456789"
     env = tmp_path / ".env"
-    env.write_text(f"GROQ_API_KEY={KEY}\n")
-    cfg = tmp_path / "s.yaml"
-    cfg.write_text("demo_mode: true\n")  # local is switched on by demo mode itself
-    assert [p.name for p in build_chat_providers(load_settings(cfg, env, environ={}))] == ["local"]
+    lines = [f"GROQ_API_KEY={KEY}", f"GEMINI_API_KEY={gem}", "OPENROUTER_API_KEY=or-x"]
+    env.write_text(chr(10).join(lines) + chr(10))
+    providers = build_chat_providers(load_settings(tmp_path / "none.yaml", env, environ={}))
+    assert [p.name for p in providers] == ["groq", "gemini", "openrouter"]
+    assert all(p.timeout_s == 3.0 for p in providers)

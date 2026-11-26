@@ -1,4 +1,4 @@
-"""LLM router: provider chain, cooldowns, validation + one retry, dialogue context. No network."""
+"""LLM router: provider chain, cooldowns, quota, validation + retry, history. No network."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ import pytest
 
 from grace.actions import create_fake_registry
 from grace.config import load_settings
+from grace.core.cooldown import Cooldowns
+from grace.core.quota import Limits, QuotaGovernor
 from grace.intent.dialogue import Dialogue
 from grace.intent.fakes import FakeChatProvider, calls, says, tool
 from grace.intent.providers import (
@@ -24,7 +26,6 @@ from grace.intent.router import (
     REPHRASE,
     SYSTEM_PROMPT,
     UNAVAILABLE,
-    Cooldowns,
     Router,
     build_router,
     spoken,
@@ -54,7 +55,7 @@ class Rows:
 
 @pytest.fixture
 def toolset():
-    return build_toolset(create_fake_registry()[0], extras=True)
+    return build_toolset(create_fake_registry()[0], search=True, images=True)
 
 
 @pytest.fixture
@@ -92,7 +93,7 @@ def test_multiple_tool_calls_keep_order_and_are_capped(toolset, clock) -> None:
 
 def test_plain_text_is_a_spoken_answer(toolset, clock) -> None:
     reply = ChatReply(content="**Paris** is the capital. It is in France. It has the Louvre.")
-    result = make(toolset, clock, FakeChatProvider("local", reply)).route("capital of france")
+    result = make(toolset, clock, FakeChatProvider("openrouter", reply)).route("capital of france")
     answer = {"text": "Paris is the capital. It is in France."}
     assert result.intents == [Intent("app.answer", answer, "capital of france", "router")]
 
@@ -133,9 +134,9 @@ def test_429_cools_down_and_falls_to_the_next(toolset, clock) -> None:
 
 def test_cooldown_expires_after_60_seconds(toolset, clock) -> None:
     groq = FakeChatProvider("groq", ProviderTimeoutError("slow"), says("Back."))
-    local = FakeChatProvider("local", says("Local."))
-    router = make(toolset, clock, groq, local, cooldown_s=60.0)
-    assert router.route("a").provider == "local"
+    backup = FakeChatProvider("openrouter", says("Local."))
+    router = make(toolset, clock, groq, backup, cooldown_s=60.0)
+    assert router.route("a").provider == "openrouter"
     clock.now += 59.9
     assert router.cooldowns.active("groq")
     clock.now += 0.2
@@ -154,10 +155,10 @@ def test_cooldown_expires_after_60_seconds(toolset, clock) -> None:
 )
 def test_any_provider_error_moves_on(toolset, clock, error) -> None:
     router = make(
-        toolset, clock, FakeChatProvider("groq", error), FakeChatProvider("local", says("ok"))
+        toolset, clock, FakeChatProvider("groq", error), FakeChatProvider("openrouter", says("ok"))
     )
     result = router.route("hi")
-    assert result.provider == "local" and router.cooldowns.active("groq")
+    assert result.provider == "openrouter" and router.cooldowns.active("groq")
 
 
 def test_all_providers_failing_is_spoken_not_raised(toolset, clock) -> None:
@@ -166,11 +167,11 @@ def test_all_providers_failing_is_spoken_not_raised(toolset, clock) -> None:
         clock,
         FakeChatProvider("groq", QuotaExceededError("q", billing_required=False)),
         FakeChatProvider("gemini", ProviderTimeoutError("slow")),
-        FakeChatProvider("local", ProviderUnavailableError("not running")),
+        FakeChatProvider("openrouter", ProviderUnavailableError("not running")),
     )
     result = router.route("hi")
     assert not result.ok and result.reply == UNAVAILABLE and result.intents == []
-    assert [a["provider"] for a in result.attempts] == ["groq", "gemini", "local"]
+    assert [a["provider"] for a in result.attempts] == ["groq", "gemini", "openrouter"]
     again = router.route("hi")  # all cooling down: nothing is called
     assert again.reply == UNAVAILABLE and {a["error"] for a in again.attempts} == {"cooldown"}
 
@@ -195,15 +196,25 @@ def test_malformed_json_gets_one_retry_with_the_error(toolset, clock) -> None:
     assert groq.requests[1]["messages"][:2] == groq.requests[0]["messages"]
 
 
-def test_unknown_tool_retried_then_rephrase(toolset, clock) -> None:
+def test_unknown_tool_retried_then_next_provider(toolset, clock) -> None:
     bad = calls(tool("launch_rockets", {}))
     groq = FakeChatProvider("groq", bad, bad)
-    local = FakeChatProvider("local")  # never asked: bad output is not a provider failure
-    router = make(toolset, clock, groq, local)
-    result = router.route("do the thing")
+    backup = FakeChatProvider("openrouter", calls(VOLUME_40))
+    router = make(toolset, clock, groq, backup)
+    result = router.route("volume forty")
+    assert result.ok and result.provider == "openrouter" and len(groq.requests) == 2
+    assert not router.cooldowns.active("groq")  # bad output is not a provider outage
+    # The next provider starts clean: same history, no correction messages from groq.
+    assert backup.requests[0]["messages"] == groq.requests[0]["messages"]
+
+
+def test_invalid_everywhere_asks_to_rephrase(toolset, clock) -> None:
+    bad = calls(tool("launch_rockets", {}))
+    groq = FakeChatProvider("groq", bad, bad)
+    backup = FakeChatProvider("openrouter", calls(tool("system_control", "{oops")), bad)
+    result = make(toolset, clock, groq, backup).route("do the thing")
     assert not result.ok and result.reply == REPHRASE and result.retried
-    assert len(groq.requests) == 2 and local.requests == []
-    assert not router.cooldowns.active("groq")
+    assert [a["provider"] for a in result.attempts] == ["groq"] * 2 + ["openrouter"] * 2
 
 
 def test_invalid_arguments_are_retried(toolset, clock) -> None:
@@ -219,23 +230,28 @@ def test_empty_reply_is_invalid(toolset, clock) -> None:
     assert make(toolset, clock, groq).route("hm").reply == REPHRASE
 
 
+def test_malformed_json_twice_falls_to_the_next_provider(toolset, clock) -> None:
+    broken = calls(tool("system_control", '{"action": "volume_set", "level": '))
+    groq = FakeChatProvider("groq", broken, broken)
+    gemini = FakeChatProvider("gemini", calls(VOLUME_40))
+    result = make(toolset, clock, groq, gemini).route("volume forty")
+    assert result.provider == "gemini" and result.intents[0].args == {"level": 40}
+
+
 def test_a_failure_during_the_retry_moves_to_the_next_provider(toolset, clock) -> None:
     groq = FakeChatProvider("groq", calls(tool("nope", {})), ProviderTimeoutError("slow"))
-    local = FakeChatProvider("local", says("Hello."))
-    result = make(toolset, clock, groq, local).route("hi")
-    assert result.provider == "local" and result.ok
+    backup = FakeChatProvider("openrouter", says("Hello."))
+    result = make(toolset, clock, groq, backup).route("hi")
+    assert result.provider == "openrouter" and result.ok
 
 
-def test_risky_intents_are_returned_for_the_gate(clock) -> None:
-    risky = build_toolset(create_fake_registry()[0], allow_risky=True)
-    groq = FakeChatProvider("groq", calls(tool("system_control", {"action": "system_shutdown"})))
-    result = make(risky, clock, groq).route("turn everything off for tonight")
-    assert [i.name for i in result.intents] == ["system.shutdown"]  # the agent asks to confirm
-    safe = build_toolset(create_fake_registry()[0])
-    groq = FakeChatProvider(
-        "groq", calls(tool("system_control", {"action": "system_shutdown"})), says("I can't.")
-    )
-    assert make(safe, clock, groq).route("shut it all down").intents[0].name == "app.answer"
+def test_risky_actions_are_never_tools_and_invented_ones_fail(clock) -> None:
+    ts = build_toolset(create_fake_registry()[0], search=True, images=True)
+    assert not {"system.shutdown", "system.restart", "system.sleep"} & ts.intents()
+    shutdown = calls(tool("system_control", {"action": "system_shutdown"}))
+    groq = FakeChatProvider("groq", shutdown, says("Say 'shut down the computer' to do that."))
+    result = make(ts, clock, groq).route("turn everything off for tonight")
+    assert [i.name for i in result.intents] == ["app.answer"]  # never system.shutdown
 
 
 # --------------------------------------------------------------------------- prompt
@@ -275,31 +291,92 @@ def test_history_and_last_action_are_sent(toolset, clock) -> None:
 def test_metrics_and_provider_callback(toolset, clock) -> None:
     rows, shown = Rows(), []
     groq = FakeChatProvider("groq", QuotaExceededError("q", billing_required=False))
-    local = FakeChatProvider("local", calls(VOLUME_40))
-    router = make(toolset, clock, groq, local, metrics=rows, on_provider=shown.append)
+    backup = FakeChatProvider("openrouter", calls(VOLUME_40))
+    router = make(toolset, clock, groq, backup, metrics=rows, on_provider=shown.append)
     router.route("my secret plan: volume forty")
     [row] = rows.rows
-    assert row["kind"] == "router" and row["provider"] == "local" and row["ok"] is True
+    assert row["kind"] == "router" and row["provider"] == "openrouter" and row["ok"] is True
     assert row["intents"] == ["volume.set"] and "latency_ms" in row
     assert "secret plan" not in json.dumps(row)  # utterances are never logged
-    assert shown == ["local"]
+    assert shown == ["openrouter"]
     make(toolset, clock, metrics=rows, on_provider=shown.append).route("x")
     assert shown[-1] == "offline"
 
 
-# --------------------------------------------------------------------------- warm-up
-def test_warm_up_sends_the_same_prefix_with_a_long_timeout(toolset, clock) -> None:
-    local = FakeChatProvider("local", says("."), timeout_s=15.0)
-    router = make(toolset, clock, local)
-    assert router.warm_up(timeout_s=120.0) is True
-    req = local.requests[0]
-    assert req["messages"][0]["content"] == SYSTEM_PROMPT and req["tools"] == toolset.tools
-    assert req["max_tokens"] == 1 and req["timeout_s"] == 120.0
-    assert (
-        make(toolset, clock, FakeChatProvider("local", ProviderTimeoutError("x"))).warm_up()
-        is False
+# --------------------------------------------------------------------------- fallback + history
+def test_fallback_keeps_the_history(toolset, clock) -> None:
+    groq = FakeChatProvider(
+        "groq", says("Canberra."), QuotaExceededError("q", billing_required=False)
     )
-    assert make(toolset, clock).warm_up() is False
+    gemini = FakeChatProvider("gemini", says("About 470,000 people."))
+    router = make(toolset, clock, groq, gemini)
+    dialogue = Dialogue(clock=clock)
+    first = router.route("what is the capital of australia", dialogue)
+    dialogue.add("what is the capital of australia", first.intents[0].args["text"])
+    second = router.route("and how many people live there", dialogue)
+    assert second.provider == "gemini"
+    sent = gemini.requests[0]["messages"]
+    assert sent[1:3] == [
+        {"role": "user", "content": "what is the capital of australia"},
+        {"role": "assistant", "content": "Canberra."},
+    ]
+    assert sent == groq.requests[1]["messages"]  # exactly what groq got before it failed
+
+
+def test_five_forced_429s_all_fall_back_without_losing_history(toolset, clock) -> None:
+    groq = FakeChatProvider("groq", *[QuotaExceededError("q", billing_required=False)] * 5)
+    gemini = FakeChatProvider("gemini", *[says(f"Answer {i}.") for i in range(5)])
+    router = make(toolset, clock, groq, gemini, cooldown_s=0.0)  # no cooldown: groq asked each time
+    dialogue = Dialogue(clock=clock)
+    for i in range(5):
+        result = router.route(f"question {i}", dialogue)
+        assert result.provider == "gemini" and result.ok
+        assert result.attempts == [{"provider": "groq", "error": "QuotaExceededError"}]
+        dialogue.add(f"question {i}", result.intents[0].args["text"])
+    last = gemini.requests[-1]["messages"]
+    assert [m["content"] for m in last[1:-1]] == [
+        x for i in range(4) for x in (f"question {i}", f"Answer {i}.")
+    ]
+    assert len(groq.requests) == 5
+
+
+# --------------------------------------------------------------------------- quota
+def test_quota_skips_an_exhausted_provider(toolset, clock, tmp_path) -> None:
+    quota = QuotaGovernor(
+        {"groq:": Limits(rpd=1)}, state_path=tmp_path / "q.json", clock=lambda: 1_800_000_000
+    )
+    groq = FakeChatProvider("groq", says("One."))
+    gemini = FakeChatProvider("gemini", says("Two."))
+    router = make(toolset, clock, groq, gemini, quota=quota)
+    assert router.route("a").provider == "groq"
+    second = router.route("b")
+    assert second.provider == "gemini"
+    assert second.attempts == [{"provider": "groq", "error": "quota"}]
+
+
+def test_tokens_are_counted_per_model(toolset, clock, tmp_path) -> None:
+    quota = QuotaGovernor({}, state_path=None, clock=lambda: 1_800_000_000)
+    reply = ChatReply(tool_calls=calls(VOLUME_40).tool_calls, usage={"total_tokens": 1234})
+    groq = FakeChatProvider("groq", reply)
+    make(toolset, clock, groq, quota=quota).route("volume 40")
+    used = quota.used("groq:")
+    assert used["rpm"] == 1 and used["rpd"] == 1 and used["tpd"] == 1234
+
+
+# --------------------------------------------------------------------------- code analysis
+def test_complete_never_sends_screen_text_to_gemini(toolset, clock) -> None:
+    gemini = FakeChatProvider("gemini", ChatReply(content="unused"))
+    groq = FakeChatProvider("groq", ProviderTimeoutError("slow"))
+    openrouter = FakeChatProvider("openrouter", ChatReply(content="Looks fine."))
+    router = make(toolset, clock, gemini, groq, openrouter)
+    text = router.complete("```secret code```", instruction="review", exclude=frozenset({"gemini"}))
+    assert text == "Looks fine." and gemini.requests == []
+    req = openrouter.requests[0]
+    assert req["tools"] == [] and req["messages"][0] == {"role": "system", "content": "review"}
+    only_gemini = make(toolset, clock, FakeChatProvider("gemini"))
+    assert "Gemini never sees screen text" in only_gemini.complete(
+        "x", exclude=frozenset({"gemini"})
+    )
 
 
 def test_cooldowns_unit() -> None:
@@ -313,68 +390,15 @@ def test_cooldowns_unit() -> None:
 
 
 def test_build_router_from_settings(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    env.write_text("GROQ_API_KEY=" + "gsk" + "_" + "A1b2C3d4" * 7 + "\n")
     cfg = tmp_path / "s.yaml"
-    cfg.write_text("demo_mode: true\nrouter: {allow_risky: true}\n")
-    router = build_router(
-        load_settings(cfg, tmp_path / ".env", environ={}), create_fake_registry()[0]
+    cfg.write_text("demo_mode: true\n")  # demo mode no longer pins the router
+    router = build_router(load_settings(cfg, env, environ={}), create_fake_registry()[0])
+    assert router.provider_names == ["groq"]
+    assert "system.shutdown" not in router.toolset.intents()
+    assert "web_search" not in router.toolset.names  # no search executor configured
+    with_tools = build_router(
+        load_settings(cfg, env, environ={}), create_fake_registry()[0], search=True, images=True
     )
-    assert router.provider_names == ["local"]
-    assert "system.shutdown" in router.toolset.intents()
-    assert "web_search" not in router.toolset.names
-
-
-# --------------------------------------------------------------------------- multi-step
-NOTEPAD = tool("apps_windows", {"action": "apps_open", "name": "notepad"}, id_="c2")
-
-
-def test_more_asks_for_the_next_step(toolset, clock) -> None:
-    first = calls(tool("system_control", {"action": "volume_set", "level": 30, "more": True}))
-    groq = FakeChatProvider("groq", first, calls(NOTEPAD))
-    result = make(toolset, clock, groq).route("set the sound to thirty and then open notepad")
-    assert [i.name for i in result.intents] == ["volume.set", "apps.open"]
-    assert result.intents[0].args == {"level": 30}  # `more` is not an action argument
-    follow = groq.requests[1]["messages"]
-    assert follow[: len(groq.requests[0]["messages"])] == groq.requests[0]["messages"]
-    assistant, queued = follow[-2], follow[-1]
-    assert assistant["role"] == "assistant" and assistant["tool_calls"][0]["id"] == "c1"
-    assert queued == {"role": "tool", "tool_call_id": "c1", "content": "Queued. Next step, if any."}
-
-
-def test_provider_extras_are_replayed_with_the_call(toolset, clock) -> None:
-    from grace.intent.providers import ToolCall
-
-    signed = ToolCall(
-        "c1",
-        "system_control",
-        '{"action": "volume_set", "level": 30, "more": true}',
-        {"extra_content": {"google": {"thought_signature": "sig"}}},
-    )
-    groq = FakeChatProvider("gemini", calls(signed), calls(NOTEPAD))
-    make(toolset, clock, groq).route("x")
-    replayed = groq.requests[1]["messages"][-2]["tool_calls"][0]
-    assert replayed["extra_content"] == {"google": {"thought_signature": "sig"}}
-    assert replayed["id"] == "c1" and replayed["function"]["name"] == "system_control"
-
-
-def test_rounds_are_bounded(toolset, clock) -> None:
-    again = calls(tool("mouse", {"action": "input_scroll", "more": True}))
-    groq = FakeChatProvider("groq", again, again, again, again)
-    router = make(toolset, clock, groq, max_intents=10)
-    result = router.route("scroll forever")
-    assert len(groq.requests) == 3 and len(result.intents) == 3
-
-
-def test_a_failure_in_a_later_round_restarts_on_the_next_provider(toolset, clock) -> None:
-    first = calls(tool("system_control", {"action": "volume_set", "level": 30, "more": True}))
-    groq = FakeChatProvider("groq", first, ProviderTimeoutError("slow"))
-    local = FakeChatProvider("local", calls(VOLUME_40))
-    result = make(toolset, clock, groq, local).route("x")
-    assert result.provider == "local" and [i.args for i in result.intents] == [{"level": 40}]
-
-
-def test_invalid_later_round_keeps_the_earlier_steps(toolset, clock) -> None:
-    first = calls(tool("system_control", {"action": "volume_set", "level": 30, "more": True}))
-    bad = calls(tool("nope", {}))
-    groq = FakeChatProvider("groq", first, bad, bad)
-    result = make(toolset, clock, groq).route("x")
-    assert result.ok and [i.name for i in result.intents] == ["volume.set"]
+    assert {"web_search", "generate_image"} <= set(with_tools.toolset.names)

@@ -4,21 +4,27 @@
 
 Grammar hits never reach this module. For everything else:
 
-- Providers are tried in settings order (groq -> gemini -> openrouter -> local). Cloud requests
-  time out after 3 s, local after 15 s. HTTP 429, a timeout or any other provider error puts
-  that provider in a 60 s cooldown and the next one is tried. Nothing raises out of ``route``.
+- Providers are tried in settings order (groq -> gemini -> openrouter). Requests time out
+  after 3 s. HTTP 429, a timeout or any other provider error puts that provider in a 60 s
+  cooldown (grace/core/cooldown.py) and the next one is tried. A provider whose free quota is
+  used up (grace/core/quota.py) is skipped. Nothing raises out of ``route``; when every
+  provider is down GRACE says so and fixed commands keep working.
+- The LLM is a stateless orchestrator: the router owns the dialogue (last 6 exchanges + the
+  last action) and sends it with the tool list on every call, so any provider can take over
+  mid-conversation. No server-side conversation ids.
 - The model must answer with tool calls (or plain text, taken as a spoken answer). Every call
   is validated with pydantic into an Intent (grace/intent/tools.py). An invalid reply (bad JSON,
-  unknown tool, bad arguments) gets ONE retry on the same provider with the error explained;
-  after that GRACE asks the user to rephrase.
+  unknown tool, bad arguments) gets ONE retry on the same provider with the error explained,
+  then the next provider is tried; only when all of them fail does GRACE ask to rephrase.
 - Multi-step requests: a call with ``more: true`` means another step follows. The router shows
   the model its calls as queued and asks again (at most MAX_ROUNDS calls per request). Nothing
   runs until ``route`` returns, so a provider failing half-way just restarts on the next one.
 - The system prompt and tool list are built once and are byte-identical on every call (keeps
-  llama-server's prompt cache warm). What changes per call (history, last action, time) goes
-  after them, in the messages.
-- Risky intents the model returns (only offered with router.allow_risky) are handed back like
-  any other; the voice agent sends them through the confirmation gate.
+  provider prompt caches warm). What changes per call (history, last action, time) goes after
+  them, in the messages.
+- Risky actions are never offered as tools. If a model invents one anyway it fails validation.
+- ``complete`` (code analysis) runs the same chain without tools and can exclude providers:
+  screen text never goes to Gemini.
 
 Runs on the intent thread (grace-intent); it blocks only that thread.
 """
@@ -33,6 +39,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from grace.core.cooldown import Cooldowns
+from grace.core.quota import NullQuota, Quota
 from grace.intent.dialogue import Dialogue
 from grace.intent.providers import (
     ChatProvider,
@@ -47,8 +55,7 @@ from grace.metrics.log import Metrics, NullMetrics
 
 log = logging.getLogger(__name__)
 
-# Byte-identical on every call (see module doc). Keep it short: small local models follow
-# short prompts better, and every token is processed on the CPU.
+# Byte-identical on every call (see module doc). Short: every token counts against free quotas.
 SYSTEM_PROMPT = (
     "You are GRACE, a voice assistant that controls the user's Windows computer. Every reply "
     "is a tool call. To do something on the computer, call the matching tool; never claim you "
@@ -59,13 +66,13 @@ SYSTEM_PROMPT = (
     "unclear, ask a short question with "
     "answer_user. 'Last action' in the user's message is what GRACE just did: use it for "
     "follow-ups like 'a bit more', 'undo that' or 'now the brightness'. You cannot shut down, "
-    "restart or sleep the computer unless a tool offers it: tell the user to say 'shut down "
-    "the computer' themselves, which asks for confirmation."
+    "restart or sleep the computer: tell the user to say 'shut down the computer' themselves, "
+    "which asks for confirmation."
 )
 REPHRASE = "Sorry, I didn't get that. Could you say it another way?"
 UNAVAILABLE = "I can't reach an assistant right now. Fixed commands still work."
 NO_PROVIDER = "I'm not sure how to help with that. Say help for the commands I know."
-WARM_UP_TIMEOUT_S = 180.0
+ANALYSIS_INSTRUCTION = "Answer briefly in plain spoken English, no markdown."
 MAX_INTENTS = 3
 MAX_ROUNDS = 3  # model calls per request when it asks for more steps (excluding the retry)
 
@@ -78,30 +85,6 @@ def spoken(text: str, max_sentences: int = 2) -> str:
     plain = " ".join(_MARKDOWN.sub(" ", text or "").split())
     sentences = [s for s in _SENTENCE_END.split(plain) if s]
     return " ".join(sentences[:max_sentences]).strip()
-
-
-class Cooldowns:
-    """Providers that failed recently are skipped until their cooldown ends. Pure state."""
-
-    def __init__(self, cooldown_s: float = 60.0, clock: Callable[[], float] = time.monotonic):
-        self.cooldown_s = cooldown_s
-        self._clock = clock
-        self._until: dict[str, float] = {}
-
-    def trip(self, name: str) -> None:
-        self._until[name] = self._clock() + self.cooldown_s
-
-    def active(self, name: str) -> bool:
-        until = self._until.get(name)
-        if until is None:
-            return False
-        if self._clock() >= until:
-            del self._until[name]
-            return False
-        return True
-
-    def remaining(self, name: str) -> float:
-        return max(0.0, self._until.get(name, 0.0) - self._clock()) if self.active(name) else 0.0
 
 
 @dataclass
@@ -125,6 +108,8 @@ class Router:
         max_tokens: int = 300,
         temperature: float = 0.2,
         max_intents: int = MAX_INTENTS,
+        analysis_timeout_s: float = 15.0,
+        quota: Quota | None = None,
         metrics: Metrics | None = None,
         on_provider: Callable[[str], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -136,6 +121,8 @@ class Router:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.max_intents = max_intents
+        self.analysis_timeout_s = analysis_timeout_s
+        self.quota = quota or NullQuota()
         self.metrics = metrics or NullMetrics()
         self._on_provider = on_provider or (lambda _name: None)
         self._clock = clock
@@ -193,18 +180,34 @@ class Router:
     def _route(self, text: str, dialogue: Dialogue | None) -> RouteResult:
         if not self.providers:
             return RouteResult(reply=NO_PROVIDER, ok=False)
-        messages = self.messages(text, dialogue)
+        messages = self.messages(text, dialogue)  # the SAME history goes to every provider
         attempts: list[dict[str, str]] = []
+        invalid = None
         for provider in self.providers:
-            if self.cooldowns.active(provider.name):
-                attempts.append({"provider": provider.name, "error": "cooldown"})
+            skip = self._skip(provider)
+            if skip:
+                attempts.append({"provider": provider.name, "error": skip})
                 continue
             try:
-                return self._converse(provider, messages, text, attempts)
+                result = self._converse(provider, messages, text, attempts)
             except ProviderError as exc:
                 self._fail(provider.name, exc)
                 attempts.append({"provider": provider.name, "error": type(exc).__name__})
+                continue
+            if result.ok:
+                return result
+            invalid = result  # bad output twice: try the next provider (no cooldown)
+        if invalid is not None:
+            invalid.attempts = attempts
+            return invalid
         return RouteResult(reply=UNAVAILABLE, ok=False, attempts=attempts)
+
+    def _skip(self, provider: ChatProvider) -> str | None:
+        if self.cooldowns.active(provider.name):
+            return "cooldown"
+        if not self.quota.allow(_quota_key(provider)):
+            return "quota"
+        return None
 
     def _converse(
         self,
@@ -234,10 +237,7 @@ class Router:
                     attempts.append({"provider": provider.name, "error": f"invalid: {error}"})
                     break
             intents += got
-            done = len(intents) >= self.max_intents or any(
-                i.name in self.toolset.risky for i in got
-            )
-            if not more or done:
+            if not more or len(intents) >= self.max_intents:
                 break
             convo += self._continuation(reply)
         if not intents:
@@ -249,9 +249,15 @@ class Router:
         )
 
     def _chat(self, provider: ChatProvider, messages: list[dict[str, Any]]) -> ChatReply:
-        return provider.chat(
-            messages, self._tools, max_tokens=self.max_tokens, temperature=self.temperature
-        )
+        try:
+            reply = provider.chat(
+                messages, self._tools, max_tokens=self.max_tokens, temperature=self.temperature
+            )
+        except ProviderError:
+            self.quota.record(_quota_key(provider))  # a failed request still counts
+            raise
+        self.quota.record(_quota_key(provider), tokens=_tokens(reply))
+        return reply
 
     def _fail(self, name: str, exc: ProviderError) -> None:
         self.cooldowns.trip(name)
@@ -318,53 +324,75 @@ class Router:
             },
         ]
 
-    # ------------------------------------------------------------------ warm-up
-    def warm_up(self, timeout_s: float = WARM_UP_TIMEOUT_S) -> bool:
-        """Send the system prompt + tools once so the first real request is fast (demo mode:
-        llama-server processes and caches the prompt). Never raises."""
-        if not self.providers:
-            return False
-        provider = self.providers[0]
-        started = self._clock()
-        try:
-            provider.chat(
-                [self._system, {"role": "user", "content": "Hello"}],
-                self._tools,
-                max_tokens=1,
-                temperature=self.temperature,
-                timeout_s=timeout_s,
-            )
-        except ProviderError as exc:
-            log.warning("router warm-up on %s failed: %s", provider.name, exc)
-            self.metrics.write("router_warm_up", provider=provider.name, ok=False)
-            return False
-        ms = (self._clock() - started) * 1000
-        log.info("router warm-up on %s took %.0f ms", provider.name, ms)
-        self.metrics.write("router_warm_up", provider=provider.name, ok=True, ms=round(ms, 1))
-        return True
+    # ------------------------------------------------------------------ code analysis
+    def complete(
+        self, prompt: str, *, instruction: str | None = None, exclude: frozenset[str] = frozenset()
+    ) -> str:
+        """One-shot text, no tools, no history (code analysis). ``exclude`` names providers
+        that must not see the text (screen text never goes to Gemini). Never raises."""
+        messages = [
+            {"role": "system", "content": instruction or ANALYSIS_INSTRUCTION},
+            {"role": "user", "content": prompt},
+        ]
+        for provider in self.providers:
+            if provider.name in exclude or self._skip(provider):
+                continue
+            try:
+                reply = provider.chat(
+                    messages, [], max_tokens=400, temperature=self.temperature,
+                    timeout_s=self.analysis_timeout_s,
+                )  # fmt: skip
+            except ProviderError as exc:
+                self.quota.record(_quota_key(provider))
+                self._fail(provider.name, exc)
+                continue
+            self.quota.record(_quota_key(provider), tokens=_tokens(reply))
+            if reply.content:
+                self._on_provider(provider.name)
+                return reply.content
+        allowed = [p.name for p in self.providers if p.name not in exclude]
+        if not allowed:
+            return "Code analysis needs a Groq or OpenRouter key: Gemini never sees screen text."
+        return UNAVAILABLE
+
+
+def _quota_key(provider: ChatProvider) -> str:
+    return f"{provider.name}:{getattr(provider, 'model', '')}"
+
+
+def _tokens(reply: ChatReply) -> int:
+    try:
+        return int(reply.usage.get("total_tokens") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def build_router(
     settings: Any,
     registry: Any,
     *,
-    extras: bool = False,
+    search: bool = False,
+    images: bool = False,
+    quota: Quota | None = None,
     metrics: Metrics | None = None,
     on_provider: Callable[[str], None] | None = None,
     providers: Sequence[ChatProvider] | None = None,
 ) -> Router:
-    """Router from settings. ``providers`` overrides the real clients (tests, eval --fake)."""
+    """Router from settings. ``search`` / ``images`` offer those tools (their executors are
+    configured). ``providers`` overrides the real clients (tests, eval)."""
     from grace.intent.providers import build_chat_providers
     from grace.intent.tools import build_toolset
 
     r = settings.router
-    toolset = build_toolset(registry, extras=extras, allow_risky=r.allow_risky)
+    toolset = build_toolset(registry, search=search, images=images)
     return Router(
         build_chat_providers(settings) if providers is None else providers,
         toolset,
         cooldown_s=r.cooldown_s,
         max_tokens=r.max_tokens,
         temperature=r.temperature,
+        analysis_timeout_s=r.analysis_timeout_s,
+        quota=quota,
         metrics=metrics,
         on_provider=on_provider,
     )

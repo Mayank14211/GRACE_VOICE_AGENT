@@ -1,31 +1,32 @@
 """LLM tool schema, generated from the action registry, and tool call -> Intent validation.
 
-The router offers 8-10 grouped tools instead of one per action (small local models choose far
-better from a short list). Each group is one OpenAI-style function whose ``action`` parameter
-picks the sub-action; the other parameters are the union of the sub-actions' pydantic args
-models, so the schema always matches the registry:
+The router offers 8-10 grouped tools instead of one per action (models choose far better from
+a short list, and a short list costs fewer tokens of free quota). Each group is one
+OpenAI-style function whose ``action`` parameter picks the sub-action; the other parameters
+are the union of the sub-actions' pydantic args models, so the schema always matches the
+registry:
 
-    system_control  volume / brightness (+ shutdown / restart / sleep with allow_risky)
+    system_control  volume / brightness
     mouse           click, scroll
     keyboard_text   type, key presses, clipboard, start dictation
     apps_windows    open apps / sites / links, close window / tab
     read_screen     read the screen or selection aloud, analyse / debug code, screenshot
     notifications   any registry action named notifications.* (S09)
-    web_search      Gemini extras (only offered when they are available)
-    generate_image
+    web_search      our search tool (Tavily), offered when TAVILY_API_KEY is set
+    generate_image  Cloudflare FLUX.1 schnell, offered when the Cloudflare keys are set
     answer_user     a short spoken answer
 
 Groups whose actions are not registered are left out. Pointer primitives (move_to, mouse
 down / up, release_all) and screen.show_image are never offered: the model can't see the
-screen, and a held button must always be released. Risky actions are offered only with
-``allow_risky`` and still go through the confirmation gate.
+screen, and a held button must always be released. Risky actions (shutdown, restart, sleep)
+are NEVER offered: they need the exact phrase plus confirmation (docs/PLAN.md section 3).
 
 Every tool except answer_user also takes ``more``: true when the user asked for another step
 after this one. Groq's gpt-oss-20b can't make parallel tool calls, so the router asks again for
 the next step instead of losing it ("set the sound to 30 and then open notepad").
 
 ``ToolSet.tools`` is built once and serialised the same way every call, so the system prompt +
-tool list stay byte-identical (llama-server reuses its prompt cache). Pure: no network, no OS.
+tool list stay byte-identical (provider prompt caches stay warm). Pure: no network, no OS.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import Field, ValidationError
 
@@ -54,7 +55,6 @@ EXCLUDED_ACTIONS = frozenset(
 _SCHEMA_KEYS = frozenset(
     {"type", "description", "enum", "properties", "required", "items", "minimum", "maximum"}
 )
-ASPECT_RATIOS = ("1:1", "16:9", "9:16", "4:3", "3:4")
 MAX_ANSWER_CHARS = 600
 MORE = "more"
 MORE_PARAM = {
@@ -79,7 +79,6 @@ class ImageArgs(ActionArgs):
     prompt: str = Field(
         min_length=1, max_length=2000, description="Detailed description of the image."
     )
-    aspect_ratio: Literal["1:1", "16:9", "9:16", "4:3", "3:4"] = "1:1"
 
 
 @dataclass(frozen=True)
@@ -211,7 +210,6 @@ class ToolSet:
 
     tools: list[dict[str, Any]]
     subs: dict[str, dict[str, SubAction]]  # tool -> action value -> sub-action
-    risky: frozenset[str] = frozenset()
 
     @property
     def names(self) -> list[str]:
@@ -344,20 +342,20 @@ def _single_tool(name: str, app: AppAction) -> tuple[dict[str, Any], SubAction]:
 def build_toolset(
     registry: ActionRegistry,
     *,
-    extras: bool = False,
-    allow_risky: bool = False,
+    search: bool = False,
+    images: bool = False,
     app_intents: Iterable[str] | None = None,
     groups: tuple[GroupDef, ...] = GROUPS,
 ) -> ToolSet:
     """Generate the grouped tools from ``registry``.
 
-    ``extras`` adds web_search and generate_image (Gemini extras available). ``app_intents``
-    limits which app-handled sub-actions are offered (None = all of them).
+    ``search`` / ``images`` add web_search / generate_image (their executors are configured).
+    ``app_intents`` limits which app-handled sub-actions are offered (None = all of them).
+    Risky actions are always left out.
     """
     allowed_app = None if app_intents is None else set(app_intents)
     tools: list[dict[str, Any]] = []
     subs: dict[str, dict[str, SubAction]] = {}
-    risky: set[str] = set()
     names = registry.names()
     for g in groups:
         wanted = list(g.actions) + [
@@ -369,9 +367,7 @@ def build_toolset(
                 continue
             spec = registry.spec(action)
             if spec.risky:
-                if not allow_risky:
-                    continue
-                risky.add(action)
+                continue
             group_subs.append(
                 SubAction(g.name, sub_name(action), action, spec.args_model, spec.description)
             )
@@ -384,9 +380,10 @@ def build_toolset(
             continue
         tools.append(_group_tool(g.name, g.description, group_subs))
         subs[g.name] = {s.name: s for s in group_subs}
-    singles = [(WEB_SEARCH_TOOL, WEB_SEARCH), (IMAGE_TOOL, GENERATE_IMAGE)] if extras else []
+    singles = [(WEB_SEARCH_TOOL, WEB_SEARCH)] if search else []
+    singles += [(IMAGE_TOOL, GENERATE_IMAGE)] if images else []
     for name, app in [*singles, (ANSWER_TOOL, ANSWER)]:
         tool, sub = _single_tool(name, app)
         tools.append(tool)
         subs[name] = {"": sub}
-    return ToolSet(tools, subs, frozenset(risky))
+    return ToolSet(tools, subs)

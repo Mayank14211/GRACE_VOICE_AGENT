@@ -25,7 +25,7 @@ def registry():
 
 
 def test_generated_schema_matches_the_registry(registry) -> None:
-    ts = build_toolset(registry, extras=True)
+    ts = build_toolset(registry, search=True, images=True)
     offered = ts.intents()
     expected = {s.name for s in registry if not s.risky and s.name not in EXCLUDED_ACTIONS}
     # Every safe registry action is offered exactly once, and nothing that isn't registered
@@ -57,13 +57,15 @@ def test_parameters_come_from_the_args_models(registry) -> None:
 
 
 def test_eight_to_ten_grouped_tools(registry) -> None:
-    ts = build_toolset(registry, extras=True)
+    ts = build_toolset(registry, search=True, images=True)
     assert ts.names == [
         "system_control", "mouse", "keyboard_text", "apps_windows", "read_screen",
         "web_search", "generate_image", "answer_user",
     ]  # fmt: skip
     assert len(GROUPS) + 3 == 9  # + notifications once S09 registers notifications.*
-    assert "web_search" not in build_toolset(registry).names  # no Gemini extras
+    assert "web_search" not in build_toolset(registry).names  # no search key
+    only_search = build_toolset(registry, search=True).names
+    assert "web_search" in only_search and "generate_image" not in only_search
 
 
 def test_notifications_group_appears_when_registered(registry) -> None:
@@ -73,38 +75,33 @@ def test_notifications_group_appears_when_registered(registry) -> None:
     registry.register("notifications.read", ReadArgs, description="Read recent notifications.")(
         lambda args: ActionResult(True, "None.")
     )
-    ts = build_toolset(registry, extras=True)
+    ts = build_toolset(registry, search=True, images=True)
     assert "notifications" in ts.names and len(ts.names) == 9
     intent = ts.to_intent("notifications", {"action": "notifications_read", "count": 2}, "x")
     assert intent == Intent("notifications.read", {"count": 2}, "x", "router")
 
 
 def test_pointer_primitives_and_show_image_are_never_offered(registry) -> None:
-    offered = build_toolset(registry, extras=True, allow_risky=True).intents()
+    offered = build_toolset(registry, search=True, images=True).intents()
     assert not offered & EXCLUDED_ACTIONS
 
 
-def test_risky_actions_only_with_allow_risky(registry) -> None:
-    assert (
-        not {"system.shutdown", "system.restart", "system.sleep"}
-        & build_toolset(registry).intents()
-    )
-    ts = build_toolset(registry, allow_risky=True)
-    assert ts.risky == {"system.shutdown", "system.restart", "system.sleep"}
-    assert ts.to_intent("system_control", {"action": "system_shutdown"}, "x").name == (
-        "system.shutdown"
-    )
+def test_risky_actions_are_never_offered(registry) -> None:
+    ts = build_toolset(registry, search=True, images=True)
+    assert not {"system.shutdown", "system.restart", "system.sleep"} & ts.intents()
+    with pytest.raises(ToolCallError):
+        ts.to_intent("system_control", {"action": "system_shutdown"}, "x")
 
 
 def test_schema_is_byte_identical_across_builds(registry) -> None:
-    a = build_toolset(registry, extras=True)
-    b = build_toolset(create_fake_registry()[0], extras=True)
+    a = build_toolset(registry, search=True, images=True)
+    b = build_toolset(create_fake_registry()[0], search=True, images=True)
     assert a.fingerprint() == b.fingerprint()
     assert json.dumps(a.tools) == json.dumps(b.tools)  # same key order too
 
 
 def test_valid_calls_become_router_intents(registry) -> None:
-    ts = build_toolset(registry, extras=True)
+    ts = build_toolset(registry, search=True, images=True)
     assert ts.to_intent("system_control", '{"action": "volume_set", "level": 40}', "t") == Intent(
         "volume.set", {"level": 40}, "t", "router"
     )
@@ -115,7 +112,7 @@ def test_valid_calls_become_router_intents(registry) -> None:
     assert ts.to_intent("read_screen", {"action": "read_screen"}, "t").name == "app.read_screen"
     assert ts.to_intent("web_search", {"query": "news"}, "t").args == {"query": "news"}
     img = ts.to_intent("generate_image", {"prompt": "a cat"}, "t")
-    assert img.args == {"prompt": "a cat", "aspect_ratio": "1:1"}
+    assert img.args == {"prompt": "a cat"}
 
 
 @pytest.mark.parametrize(
@@ -130,14 +127,14 @@ def test_valid_calls_become_router_intents(registry) -> None:
         ("system_control", '{"action": "volume_set", "level": "loud"}', "invalid level"),
         ("apps_windows", '{"action": "apps_open", "name": ""}', "invalid name"),
         ("answer_user", '{"text": ""}', "invalid text"),
-        ("generate_image", '{"prompt": "x", "aspect_ratio": "2:1"}', "invalid aspect_ratio"),
+        ("generate_image", '{"prompt": ""}', "invalid prompt"),
         ("system_control", '{"action": "system_shutdown"}', "'action' must be one of"),
     ],
 )
 def test_invalid_calls_raise_with_a_reason_for_the_model(
     registry, tool: str, arguments: str, message: str
 ) -> None:
-    ts = build_toolset(registry, extras=True)
+    ts = build_toolset(registry, search=True, images=True)
     with pytest.raises(ToolCallError, match=message):
         ts.to_intent(tool, arguments, "t")
 
@@ -152,7 +149,7 @@ def test_describe_for_the_dialogue_context(registry) -> None:
 
 
 def test_every_action_tool_takes_more(registry) -> None:
-    ts = build_toolset(registry, extras=True)
+    ts = build_toolset(registry, search=True, images=True)
     for t in ts.tools:
         props = t["function"]["parameters"]["properties"]
         assert ("more" in props) == (t["function"]["name"] != "answer_user")

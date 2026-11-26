@@ -207,7 +207,7 @@ def test_quiet_actions_log_at_debug(reg, caplog: pytest.LogCaptureFixture) -> No
 def test_pointer_primitives_are_not_llm_tools(reg) -> None:
     from grace.intent.tools import build_toolset
 
-    offered = build_toolset(reg[0], extras=True, allow_risky=True).intents()
+    offered = build_toolset(reg[0], search=True, images=True).intents()
     assert not {"input.move_to", "input.mouse_down", "input.mouse_up"} & offered
 
 

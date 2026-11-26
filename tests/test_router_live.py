@@ -3,7 +3,7 @@ the PC changes.
 
     uv run pytest -m network tests/test_router_live.py -v
 
-Each enabled provider (key in .env; local only when llama-server answers) is tested on its own:
+Each enabled provider (key in .env) is tested on its own:
 a plain answer, memory across turns, a tool call, and a refused shutdown. Fixtures never yield
 key strings (pytest prints fixture values on failure; provider reprs hide keys).
 """
@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import re
 
-import httpx
 import pytest
 
 from grace.actions import create_fake_registry
@@ -26,16 +25,7 @@ pytestmark = pytest.mark.network
 
 
 def _providers():
-    settings = load_settings()
-    found = []
-    for provider in build_chat_providers(settings):
-        if provider.name == "local":
-            try:
-                httpx.get(settings.router.local.base_url + "/models", timeout=2.0)
-            except httpx.HTTPError:
-                continue
-        found.append(provider)
-    return found
+    return build_chat_providers(load_settings())
 
 
 PROVIDERS = _providers()
@@ -59,7 +49,7 @@ def digits(text: str) -> str:
     return " ".join(re.findall(r"\d+", t))
 
 
-@pytest.mark.skipif(not PROVIDERS, reason="no provider key in .env and no llama-server running")
+@pytest.mark.skipif(not PROVIDERS, reason="no provider key in .env")
 @pytest.mark.parametrize("provider", PROVIDERS, ids=lambda p: p.name)
 def test_answer_memory_and_tool_call(provider) -> None:
     provider.timeout_s = max(provider.timeout_s, 20.0)  # a cold free tier can be slow
