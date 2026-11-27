@@ -161,18 +161,18 @@ Run 2026-11-26 22:17 on 12th Gen Intel(R) Core(TM) i5-12450H (Windows 11 build 2
 <!-- eval_router_offline:start -->
 ### eval_router --offline
 
-Run 2026-11-26 21:25 on 12th Gen Intel(R) Core(TM) i5-12450H (Windows 11 build 26300), network off (every connection sent to a dead proxy). Chain: groq (3 s) -> gemini (3 s). Router: 5/5 requests got the spoken fallback, slowest 4185 ms. Fixed commands: 5/5 worked.
+Run 2026-11-27 06:10 on 12th Gen Intel(R) Core(TM) i5-12450H (Windows 11 build 26300), network off (every connection sent to a dead proxy). Chain: groq (3 s) -> gemini (6 s). Router: 5/5 requests got the spoken fallback, slowest 4230 ms. Fixed commands: 5/5 worked.
 
 | request | kind | ms | result |
 |---|---|---|---|
-| could you make it a little quieter | router | 4185 | groq: ProviderConnectionError, gemini: ProviderConnectionError |
-| what is the capital of australia | router | 1 | groq: cooldown, gemini: cooldown |
-| and how many people live there | router | 0 | groq: cooldown, gemini: cooldown |
-| search the web for today's weather in Delhi | router | 0 | groq: cooldown, gemini: cooldown |
+| could you make it a little quieter | router | 4230 | groq: ProviderConnectionError, gemini: ProviderConnectionError |
+| what is the capital of australia | router | 31 | groq: cooldown, gemini: cooldown |
+| and how many people live there | router | 1 | groq: cooldown, gemini: cooldown |
+| search the web for today's weather in Delhi | router | 1 | groq: cooldown, gemini: cooldown |
 | draw me a picture of a cat wearing sunglasses | router | 1 | groq: cooldown, gemini: cooldown |
-| volume 40 | grammar | 1 | volume.set |
-| a bit more | followup | 1 | volume.step |
-| brightness 60 | grammar | 0 | brightness.set |
-| scroll down | grammar | 0 | input.scroll |
-| open notepad | grammar | 0 | apps.open |
+| volume 40 | grammar | 2 | volume.set |
+| a bit more | followup | 2 | volume.step |
+| brightness 60 | grammar | 1 | brightness.set |
+| scroll down | grammar | 1 | input.scroll |
+| open notepad | grammar | 1 | apps.open |
 <!-- eval_router_offline:end -->
