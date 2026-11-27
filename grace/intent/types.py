@@ -21,8 +21,16 @@ APP_INTENTS = frozenset(
         "app.analyze_code",
         "app.analyze_screen",
         "app.debug_code",
+        # Router-only (S07): a spoken answer, and the Gemini extras.
+        "app.answer",
+        "app.web_search",
+        "app.generate_image",
     }
 )
+
+# grammar: fixed command; followup: "a bit more" / "undo that" resolved from the last action;
+# router: chosen by an LLM.
+Source = Literal["grammar", "followup", "router", "gesture", "hotkey"]
 
 
 @dataclass(frozen=True)
@@ -30,4 +38,4 @@ class Intent:
     name: str  # an action registry name, or one of APP_INTENTS
     args: dict[str, Any] = field(default_factory=dict, hash=False)
     text: str = ""  # the normalised utterance it came from
-    source: Literal["grammar", "router", "gesture", "hotkey"] = "grammar"
+    source: Source = "grammar"

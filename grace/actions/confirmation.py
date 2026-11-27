@@ -15,7 +15,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import ValidationError
 
@@ -39,6 +39,12 @@ def start_thread_timer(delay_s: float, callback: Callable[[], None]) -> Cancella
     timer.daemon = True
     timer.start()
     return timer
+
+
+def for_source(registry: Any, source: str) -> Any:
+    """``registry`` tagging its actions with ``source`` (ExecutorRegistry), or itself."""
+    tag = getattr(registry, "for_source", None)
+    return tag(source) if callable(tag) else registry
 
 
 def format_hotkey(hotkey: str) -> str:
@@ -125,7 +131,8 @@ class ConfirmationGate:
             self._say(f"Cancelled: {pending.label} was not confirmed in time.")
             return None
         log.info("confirmed %s", pending.intent.name)
-        result = self._registry.execute(pending.intent.name, pending.intent.args, confirmed=True)
+        registry = for_source(self._registry, pending.intent.source)
+        result = registry.execute(pending.intent.name, pending.intent.args, confirmed=True)
         self._say(result.message)
         return result
 
@@ -180,6 +187,6 @@ class Dispatcher:
             self.gate.request(intent)
             return None
         else:
-            result = self.registry.execute(intent.name, intent.args)
+            result = for_source(self.registry, intent.source).execute(intent.name, intent.args)
         self._say(result.message)
         return result

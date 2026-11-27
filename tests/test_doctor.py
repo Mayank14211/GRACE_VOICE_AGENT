@@ -80,7 +80,7 @@ def test_unbuilt_features_are_not_configured() -> None:
 
 @pytest.mark.skipif(bool(models.missing()), reason="run scripts/fetch_models.py")
 def test_doctor_no_hardware_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
-    assert doctor.main(["--no-hardware"]) == 0, capsys.readouterr().out
+    assert doctor.main(["--no-hardware", "--no-network"]) == 0, capsys.readouterr().out
 
 
 def test_doctor_checks_every_required_model_and_the_voice_stack() -> None:
@@ -153,7 +153,7 @@ def test_gesture_map_check(tmp_path: Path) -> None:
 
 
 def test_env_keys_match_config() -> None:
-    from grace.config import ENV_KEYS
+    from grace.config import ALL_ENV_KEYS as ENV_KEYS
 
     assert set(doctor.ENV_KEYS) == set(ENV_KEYS.values())
 
@@ -165,7 +165,6 @@ def test_settings_missing_is_not_configured(tmp_path: Path) -> None:
         "provider groq",
         "provider gemini",
         "provider openrouter",
-        "provider local",
     }
     assert all(r.status != doctor.FAIL for r in results)
 
@@ -194,3 +193,48 @@ def test_doctor_imports_new_layers() -> None:
 def test_assistant_check_without_key(tmp_path: Path) -> None:
     result = doctor.check_assistant(tmp_path / "none.yaml", tmp_path / ".env")
     assert result.status == doctor.NOT_CONFIGURED
+
+
+def test_router_check_never_offers_risky_tools(tmp_path: Path) -> None:
+    result = doctor.check_router(tmp_path / "none.yaml", tmp_path / ".env")
+    assert result.status == doctor.NOT_CONFIGURED  # no LLM key
+    assert result.detail.startswith("8 tools")  # 9 once S09 registers notifications.*
+    assert "risky actions never offered" in result.detail
+
+
+def test_tools_check_reports_which_tools_have_keys(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    env.write_text("TAVILY_API_KEY=tvly-x" + chr(10))
+    result = doctor.check_assistant(tmp_path / "none.yaml", env)
+    assert result.status == doctor.PASS and result.detail == "web_search: tavily"
+
+
+def test_reachability_uses_quota_free_calls(tmp_path: Path, monkeypatch) -> None:
+    import httpx
+
+    from grace.intent.images import CloudflareFlux
+    from grace.intent.search import TavilySearch
+
+    seen: list[str] = []
+
+    def fake_get(url, headers=None, timeout=None):
+        seen.append(url)
+        code = 401 if "openrouter" in url else 200
+        return httpx.Response(code, json={"data": []}, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    monkeypatch.setattr(CloudflareFlux, "check", lambda self: (True, "token active"))
+    monkeypatch.setattr(TavilySearch, "check", lambda self: (False, "HTTP 401"))
+    env = tmp_path / ".env"
+    groq = "gsk" + "_" + "A1b2C3d4" * 7
+    env.write_text(
+        chr(10).join([f"GROQ_API_KEY={groq}", "OPENROUTER_API_KEY=or-x",
+                      "CLOUDFLARE_ACCOUNT_ID=a", "CLOUDFLARE_API_TOKEN=t", "TAVILY_API_KEY=k"])
+    )  # fmt: skip
+    results = {r.name: r for r in doctor.check_reachability(tmp_path / "none.yaml", env)}
+    assert seen == ["https://api.groq.com/openai/v1/models", "https://openrouter.ai/api/v1/models"]
+    assert results["reach groq"].status == doctor.PASS
+    assert results["reach openrouter"].status == doctor.WARN  # a problem, never a FAIL
+    assert results["reach cloudflare"].status == doctor.PASS
+    assert results["reach tavily"].status == doctor.WARN
+    assert groq not in repr(results)

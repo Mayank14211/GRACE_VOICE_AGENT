@@ -32,9 +32,10 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SETTINGS_PATH = ROOT / "settings.yaml"
 DEFAULT_ENV_PATH = ROOT / ".env"
 
-Provider = Literal["groq", "gemini", "openrouter", "local"]
+# LLM providers (2026-11-26: cloud only, no local LLM). Order = router.provider_order.
+Provider = Literal["groq", "gemini", "openrouter"]
 CLOUD_PROVIDERS: tuple[Provider, ...] = ("groq", "gemini", "openrouter")
-ALL_PROVIDERS: tuple[Provider, ...] = (*CLOUD_PROVIDERS, "local")
+ALL_PROVIDERS: tuple[Provider, ...] = CLOUD_PROVIDERS
 
 # Provider -> .env variable holding its key.
 ENV_KEYS: dict[Provider, str] = {
@@ -42,6 +43,13 @@ ENV_KEYS: dict[Provider, str] = {
     "gemini": "GEMINI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
 }
+# Keys of the router's tools (images: Cloudflare Workers AI; web search: Tavily).
+TOOL_ENV_KEYS: dict[str, str] = {
+    "cloudflare_account_id": "CLOUDFLARE_ACCOUNT_ID",
+    "cloudflare_api_token": "CLOUDFLARE_API_TOKEN",
+    "tavily": "TAVILY_API_KEY",
+}
+ALL_ENV_KEYS: dict[str, str] = {**ENV_KEYS, **TOOL_ENV_KEYS}
 
 
 class ConfigError(ValueError):
@@ -51,6 +59,16 @@ class ConfigError(ValueError):
 class _Section(BaseModel):
     # Unknown keys are typos; reject them instead of silently ignoring a setting.
     model_config = ConfigDict(extra="forbid", validate_default=True)
+
+
+def _reject_removed(data: Any, removed: Mapping[str, str], section: str) -> Any:
+    """Settings that existed once and were removed fail with a message saying what replaced
+    them, instead of pydantic's bare "Extra inputs are not permitted"."""
+    if isinstance(data, Mapping):
+        for key, why in removed.items():
+            if key in data:
+                raise ValueError(f"{section}.{key} was removed: {why}")
+    return data
 
 
 class HotkeySettings(_Section):
@@ -152,24 +170,6 @@ class SttSettings(_Section):
     partials: bool = True  # show partial text on the overlay while the user speaks
 
 
-class GeminiSettings(_Section):
-    """Gemini assistant for requests the fixed grammar doesn't understand (needs GEMINI_API_KEY).
-
-    Text answers and tool calling work on the free tier. Web search (Google Search grounding)
-    and image generation need a key from a billing-enabled Google Cloud project.
-    """
-
-    model: str = "gemini-3.5-flash-lite"
-    image_model: str = "gemini-3.1-flash-image"
-    web_search: bool = True
-    image_generation: bool = True
-    thinking_level: Literal["minimal", "low", "medium", "high"] = "low"
-    timeout_s: float = Field(20.0, gt=0.0, le=120.0)
-    image_timeout_s: float = Field(90.0, gt=0.0, le=300.0)
-    # Forget the conversation after this long without a question (0 = never forget).
-    memory_reset_s: float = Field(600.0, ge=0.0, le=86400.0)
-
-
 GesturePose = Literal[
     "open_palm",
     "fist",
@@ -245,24 +245,152 @@ class GestureSettings(_Section):
         return self
 
 
-class LocalLLMSettings(_Section):
-    enabled: bool = False
-    base_url: str = "http://127.0.0.1:8080/v1"
+class ProviderEndpoint(_Section):
+    """One OpenAI-compatible chat endpoint. Model IDs live here, never in code (they change)."""
+
+    base_url: str
+    model: str = Field(min_length=1)
+    # Sent as `reasoning_effort` (Groq gpt-oss, Gemini's OpenAI endpoint). None = not sent.
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] | None = None
+    # Per-provider request timeout; None = router.cloud_timeout_s (3 s). Gemini's free tier
+    # answered in 1.4-3.5 s on the base machine (2026-11-26), so it may need more headroom.
+    timeout_s: float | None = Field(None, gt=0.0, le=60.0)
+
+
+def _groq_endpoint() -> ProviderEndpoint:
+    # console.groq.com/docs (checked 2026-11-26): OpenAI-compatible base URL; gpt-oss-20b does
+    # tool use and JSON mode, but not parallel tool calls.
+    return ProviderEndpoint(
+        base_url="https://api.groq.com/openai/v1",
+        model="openai/gpt-oss-20b",
+        reasoning_effort="low",
+    )
+
+
+def _gemini_endpoint() -> ProviderEndpoint:
+    # ai.google.dev/gemini-api/docs/openai: chat.completions with tools on the Gemini API key.
+    return ProviderEndpoint(
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        model="gemini-3.5-flash-lite",
+        reasoning_effort="low",
+        # The fallback must actually catch requests: on the base machine the free tier took
+        # 1.4-3.5 s (median ~1.6 s) with a tail to 4-6 s, so 3 s timed out ~1 in 5 (S07 evals).
+        timeout_s=6.0,
+    )
+
+
+def _openrouter_endpoint() -> ProviderEndpoint:
+    # openrouter.ai/api/v1/models, filtered on ":free" + "tools" (2026-11-26). The free list
+    # changes often: re-check it if this model disappears.
+    return ProviderEndpoint(
+        base_url="https://openrouter.ai/api/v1", model="google/gemma-4-26b-a4b-it:free"
+    )
+
+
+_REMOVED_ROUTER = {
+    "local": "no local LLM since 2026-11-26 (cloud-first): delete router.local",
+    "local_timeout_s": "no local LLM since 2026-11-26: delete it",
+    "allow_risky": "risky actions are never offered to the LLM; say the exact phrase instead",
+}
+_REMOVED_TOP = {
+    "gemini": (
+        "the gemini: section is gone. Chat uses router.gemini; images use images: (Cloudflare "
+        "FLUX); web search uses search: (Tavily); code analysis uses the router and never "
+        "Gemini (screen text stays away from Gemini)"
+    ),
+}
+
+
+class QuotaLimit(_Section):
+    """Free-tier limits of one provider's model. None = not limited by GRACE. The governor
+    warns at 80 % and skips the provider at 100 % until the window resets."""
+
+    rpm: int | None = Field(None, ge=1)  # requests per minute
+    rpd: int | None = Field(None, ge=1)  # requests per day
+    tpm: int | None = Field(None, ge=1)  # tokens per minute
+    tpd: int | None = Field(None, ge=1)  # tokens per day
+
+
+def _default_quotas() -> dict[str, QuotaLimit]:
+    # Groq: console.groq.com/docs/rate-limits (gpt-oss-20b free tier; check your own limits at
+    # console.groq.com/settings/limits). OpenRouter :free: 20 req/min, 50 req/day without credit.
+    # Gemini: per project, visible only in AI Studio: fill it in from there.
+    return {
+        "groq": QuotaLimit(rpm=30, rpd=1000, tpm=8000, tpd=200_000),
+        "gemini": QuotaLimit(),
+        "openrouter": QuotaLimit(rpm=20, rpd=50),
+    }
+
+
+class ImageSettings(_Section):
+    """generate_image tool: Cloudflare Workers AI FLUX.1 [schnell] (needs CLOUDFLARE_ACCOUNT_ID
+    and CLOUDFLARE_API_TOKEN with Workers AI permission). Free: 10,000 neurons/day; one
+    512x512 image at 4 steps is about 43 neurons."""
+
+    enabled: bool = True
+    model: str = "@cf/black-forest-labs/flux-1-schnell"
+    steps: int = Field(4, ge=1, le=8)
+    timeout_s: float = Field(30.0, gt=0.0, le=120.0)
+    neurons_per_day: int = Field(10_000, ge=0)  # the free allowance; 0 = no limit
+
+
+class SearchSettings(_Section):
+    """web_search tool: Tavily (needs TAVILY_API_KEY). Free: 1,000 credits/month, no card; a
+    basic search costs 1 credit. Choice: docs/results/search.md."""
+
+    enabled: bool = True
+    max_results: int = Field(3, ge=1, le=10)
+    timeout_s: float = Field(8.0, gt=0.0, le=60.0)
+    credits_per_month: int = Field(1000, ge=0)  # the free allowance; 0 = no limit
 
 
 class RouterSettings(_Section):
+    """grace/intent/router.py: the LLM fallback for anything the fixed grammar doesn't parse."""
+
     provider_order: list[Provider] = Field(default_factory=lambda: list(ALL_PROVIDERS))
     cloud_timeout_s: float = Field(3.0, gt=0.0, le=30.0)
-    local_timeout_s: float = Field(15.0, gt=0.0, le=120.0)
-    max_retries: int = Field(1, ge=0, le=3)
+    max_retries: int = Field(1, ge=0, le=3)  # network errors / 5xx only; never 429 or timeouts
     cooldown_s: float = Field(60.0, ge=0.0, le=3600.0)
-    local: LocalLLMSettings = Field(default_factory=LocalLLMSettings)
+    # Dialogue memory: user + GRACE exchanges sent with each request, and how long a pause
+    # makes GRACE forget them. Follow-ups ("a bit more", "undo that") refer to the last action
+    # for followup_s.
+    history_turns: int = Field(6, ge=0, le=20)
+    memory_reset_s: float = Field(600.0, ge=0.0, le=86400.0)
+    followup_s: float = Field(120.0, ge=5.0, le=3600.0)
+    max_tokens: int = Field(300, ge=32, le=4096)
+    temperature: float = Field(0.2, ge=0.0, le=2.0)
+    analysis_timeout_s: float = Field(15.0, gt=0.0, le=60.0)  # "analyze this code" (longer reply)
+    groq: ProviderEndpoint = Field(default_factory=_groq_endpoint)
+    gemini: ProviderEndpoint = Field(default_factory=_gemini_endpoint)
+    openrouter: ProviderEndpoint = Field(default_factory=_openrouter_endpoint)
+    quota: dict[Provider, QuotaLimit] = Field(default_factory=_default_quotas)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _removed(cls, data: Any) -> Any:
+        return _reject_removed(data, _REMOVED_ROUTER, "router")
 
     @model_validator(mode="after")
     def _no_duplicates(self) -> RouterSettings:
         if len(set(self.provider_order)) != len(self.provider_order):
             raise ValueError(f"router.provider_order has duplicates: {self.provider_order}")
+        if not self.openrouter.model.endswith(":free") and self.openrouter.model != (
+            "openrouter/free"
+        ):
+            raise ValueError(
+                "router.openrouter.model must be a ':free' model (zero running cost): "
+                f"{self.openrouter.model!r}"
+            )
+        self.quota = {**_default_quotas(), **self.quota}
         return self
+
+    def endpoint(self, provider: Provider) -> ProviderEndpoint:
+        endpoint: ProviderEndpoint = getattr(self, provider)
+        return endpoint
+
+    def timeout_s(self, provider: Provider) -> float:
+        own: float | None = getattr(self, provider).timeout_s
+        return own if own is not None else self.cloud_timeout_s
 
 
 class ApiKeys(BaseModel):
@@ -273,6 +401,9 @@ class ApiKeys(BaseModel):
     groq: SecretStr | None = None
     gemini: SecretStr | None = None
     openrouter: SecretStr | None = None
+    cloudflare_account_id: SecretStr | None = None
+    cloudflare_api_token: SecretStr | None = None
+    tavily: SecretStr | None = None
 
 
 @dataclass(frozen=True)
@@ -284,7 +415,7 @@ class ProviderStatus:
 
 class Settings(_Section):
     language: Literal["en", "hi", "auto"] = "en"
-    demo_mode: bool = False  # pins the router to [local] and skips cloud calls
+    demo_mode: bool = False  # S10 demo mode; does not change the LLM router (cloud only)
     hotkeys: HotkeySettings = Field(default_factory=HotkeySettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     inference: InferenceSettings = Field(default_factory=InferenceSettings)
@@ -293,35 +424,38 @@ class Settings(_Section):
     stt: SttSettings = Field(default_factory=SttSettings)
     gestures: GestureSettings = Field(default_factory=GestureSettings)
     router: RouterSettings = Field(default_factory=RouterSettings)
-    gemini: GeminiSettings = Field(default_factory=GeminiSettings)
+    images: ImageSettings = Field(default_factory=ImageSettings)
+    search: SearchSettings = Field(default_factory=SearchSettings)
     keys: ApiKeys = Field(default_factory=ApiKeys, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _removed(cls, data: Any) -> Any:
+        return _reject_removed(data, _REMOVED_TOP, "settings")
 
     # ------------------------------------------------------------ providers
 
     def api_key(self, provider: Provider) -> str | None:
         if provider not in ENV_KEYS:
             return None
-        secret: SecretStr | None = getattr(self.keys, provider)
-        return secret.get_secret_value() if secret else None
+        return self.secret(provider)
+
+    def secret(self, name: str) -> str | None:
+        """A value from .env by ApiKeys field name (providers and tool keys). Never log it."""
+        if name not in ALL_ENV_KEYS:
+            return None
+        value: SecretStr | None = getattr(self.keys, name)
+        return value.get_secret_value() if value else None
 
     def provider_order(self) -> list[Provider]:
-        return ["local"] if self.demo_mode else list(self.router.provider_order)
+        return list(self.router.provider_order)
 
     def provider_status(self) -> list[ProviderStatus]:
         order = self.provider_order()
         statuses = []
         for provider in ALL_PROVIDERS:
             if provider not in order:
-                why = "demo_mode pins [local]" if self.demo_mode else "not in router.provider_order"
-                statuses.append(ProviderStatus(provider, False, why))
-            elif provider == "local":
-                ok = self.router.local.enabled
-                why = (
-                    f"llama-server at {self.router.local.base_url}"
-                    if ok
-                    else "router.local.enabled is false in settings.yaml"
-                )
-                statuses.append(ProviderStatus(provider, ok, why))
+                statuses.append(ProviderStatus(provider, False, "not in router.provider_order"))
             elif self.api_key(provider):
                 statuses.append(ProviderStatus(provider, True, f"{ENV_KEYS[provider]} set"))
             else:
@@ -336,7 +470,7 @@ class Settings(_Section):
 
     def secret_values(self) -> list[str]:
         """Every configured key value, for the log redaction filter."""
-        return [k for k in (self.api_key(p) for p in CLOUD_PROVIDERS) if k]
+        return [k for k in (self.secret(n) for n in ALL_ENV_KEYS) if k]
 
 
 # ---------------------------------------------------------------- loading
@@ -351,7 +485,7 @@ def read_api_keys(env_path: Path, environ: Mapping[str, str] | None = None) -> A
     file_values = dotenv_values(env_path) if env_path.is_file() else {}
     environ = os.environ if environ is None else environ
     keys: dict[str, SecretStr] = {}
-    for provider, var in ENV_KEYS.items():
+    for provider, var in ALL_ENV_KEYS.items():
         value = (environ.get(var) or file_values.get(var) or "").strip()
         if value:
             keys[provider] = SecretStr(value)

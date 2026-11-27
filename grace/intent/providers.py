@@ -1,11 +1,17 @@
 """LLM provider clients.
 
-Gemini is called through the Interactions REST API with the already-pinned httpx (no SDK, no new
-dependency). Every call has a timeout and a retry limit; failures raise a ProviderError subclass
-with a message that is safe to speak. The API key is sent only in the `x-goog-api-key` header and
-never appears in logs, errors or reprs.
+Chat (the router, S07): every provider is an OpenAI-compatible endpoint (Groq, Gemini's OpenAI
+endpoint, OpenRouter), reached through ONE factory,
+``make_openai_client``, and wrapped in ``OpenAIChatProvider``. Base URLs and model IDs come from
+settings (router.<provider>), never from code.
 
-The S07 router adds Groq / OpenRouter / local llama-server clients here.
+``GeminiClient`` (Interactions REST API, built before S07) is kept for direct Gemini calls; since
+the 2026-11-26 decisions the router does not use it (no Gemini search grounding or image
+generation: they need billing).
+
+Every call has a timeout and a retry limit; failures raise a ProviderError subclass with a
+message that is safe to speak. API keys are sent only in request headers and never appear in
+logs, errors or reprs.
 """
 
 from __future__ import annotations
@@ -13,9 +19,9 @@ from __future__ import annotations
 import base64
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 
@@ -36,6 +42,20 @@ class ProviderUnavailableError(ProviderError):
     """Network error, timeout or 5xx."""
 
     retryable = True
+
+
+class ProviderTimeoutError(ProviderUnavailableError):
+    """The provider did not answer within the router's budget. Not retried (the budget is
+    spent); the router moves to the next provider."""
+
+    retryable = False
+
+
+class ProviderConnectionError(ProviderUnavailableError):
+    """No connection at all (offline, DNS, refused). Not retried: the router moves on at once,
+    so "network off" costs one attempt per provider, not two."""
+
+    retryable = False
 
 
 class ProviderAuthError(ProviderError):
@@ -195,3 +215,200 @@ class GeminiClient:
             if not last.retryable:
                 raise last
         raise last
+
+
+# ============================================================================ chat (router)
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    id: str
+    name: str
+    arguments: str  # raw JSON text, validated by grace.intent.tools
+    # Provider-specific fields sent back unchanged when the call is replayed (Gemini 3 rejects a
+    # function-call turn without its extra_content.google.thought_signature). Opaque; not logged.
+    extra: Mapping[str, Any] = field(default_factory=dict, compare=False, repr=False)
+
+
+@dataclass(frozen=True)
+class ChatReply:
+    content: str = ""
+    tool_calls: tuple[ToolCall, ...] = ()
+    latency_ms: float = 0.0
+    usage: Mapping[str, Any] = field(default_factory=dict)
+    timings: Mapping[str, Any] = field(default_factory=dict)  # provider timing extras, if any
+
+
+class ChatProvider(Protocol):
+    """What the router needs from a provider. Real: OpenAIChatProvider; tests: FakeChatProvider."""
+
+    name: str
+    timeout_s: float
+
+    def chat(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]],
+        *,
+        max_tokens: int,
+        temperature: float,
+        timeout_s: float | None = None,
+    ) -> ChatReply: ...
+
+
+def make_openai_client(
+    base_url: str, api_key: str, *, http_client: httpx.Client | None = None
+) -> Any:
+    """The one OpenAI-compatible client factory. SDK retries are off: the router decides."""
+    import openai  # imported here so a broken openai install only disables the router
+
+    return openai.OpenAI(api_key=api_key, base_url=base_url, max_retries=0, http_client=http_client)
+
+
+def _chat_error(provider: str, exc: Exception) -> ProviderError:
+    """openai SDK exception -> ProviderError with a speakable message. Pure."""
+    import openai
+
+    label = provider.capitalize()
+    if isinstance(exc, openai.APITimeoutError):
+        return ProviderTimeoutError(f"{label} took too long to answer.")
+    if isinstance(exc, openai.APIConnectionError):
+        return ProviderConnectionError(f"I couldn't reach {label}.")
+    if isinstance(exc, openai.APIStatusError):
+        status = exc.status_code
+        if status == 429:
+            return QuotaExceededError(
+                f"{label} is busy or out of free quota.", billing_required=False
+            )
+        if status in (401, 403):
+            return ProviderAuthError(f"The {label} API key was rejected. Check .env.")
+        if status >= 500:
+            return ProviderUnavailableError(f"{label} is having trouble right now.")
+        return ProviderRequestError(f"{label} couldn't handle that request.")
+    # APIError, or anything else the SDK raised (e.g. the body wasn't valid JSON).
+    return ProviderUnavailableError(f"{label} sent a broken reply.")
+
+
+class OpenAIChatProvider:
+    """One OpenAI-compatible chat endpoint (groq, gemini, openrouter or local)."""
+
+    def __init__(
+        self,
+        name: str,
+        client: Any,
+        model: str,
+        *,
+        timeout_s: float,
+        max_retries: int = 1,
+        reasoning_effort: str | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.perf_counter,
+    ) -> None:
+        self.name = name
+        self.model = model
+        self.timeout_s = timeout_s
+        self.max_retries = max_retries
+        self._client = client
+        self._extra = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
+        self._sleep = sleep
+        self._clock = clock
+
+    def __repr__(self) -> str:  # the client holds the key: never show it
+        return f"OpenAIChatProvider({self.name!r}, model={self.model!r})"
+
+    def chat(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]],
+        *,
+        max_tokens: int,
+        temperature: float,
+        timeout_s: float | None = None,
+    ) -> ChatReply:
+        """One completion. Network errors / 5xx are retried up to max_retries; 429, timeouts,
+        auth and request errors raise at once (the router cools the provider down)."""
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": [dict(m) for m in messages],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "timeout": timeout_s or self.timeout_s,
+        }
+        if tools:
+            kwargs["tools"] = [dict(t) for t in tools]
+            kwargs["tool_choice"] = "auto"
+        if self._extra:
+            kwargs["extra_body"] = self._extra
+        last: ProviderError = ProviderUnavailableError(f"I couldn't reach {self.name}.")
+        for attempt in range(self.max_retries + 1):
+            if attempt:
+                self._sleep(min(1.0, 0.25 * 2 ** (attempt - 1)))
+            started = self._clock()
+            try:
+                response = self._client.chat.completions.create(**kwargs)
+            except Exception as exc:  # noqa: BLE001 - mapped below; nothing escapes unmapped
+                last = _chat_error(self.name, exc)
+                log.info(
+                    "%s chat failed: %s (attempt %d)", self.name, type(last).__name__, attempt + 1
+                )
+                if not last.retryable:
+                    raise last from None
+                continue
+            try:
+                return _to_reply(response, (self._clock() - started) * 1000)
+            except Exception:  # noqa: BLE001 - an unexpected response shape
+                log.info("%s sent a reply GRACE can't read", self.name)
+                raise ProviderUnavailableError(f"{self.name} sent a broken reply.") from None
+        raise last
+
+
+def _to_reply(response: Any, latency_ms: float) -> ChatReply:
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        return ChatReply(latency_ms=latency_ms)
+    message = choices[0].message
+    calls = tuple(
+        ToolCall(
+            str(getattr(c, "id", "") or ""),
+            str(getattr(c.function, "name", "") or ""),
+            str(getattr(c.function, "arguments", "") or ""),
+            dict(getattr(c, "model_extra", None) or {}),
+        )
+        for c in (getattr(message, "tool_calls", None) or [])
+        if getattr(c, "function", None) is not None
+    )
+    usage = getattr(response, "usage", None)
+    extra = getattr(response, "model_extra", None) or {}
+    return ChatReply(
+        content=str(getattr(message, "content", "") or "").strip(),
+        tool_calls=calls,
+        latency_ms=latency_ms,
+        usage=usage.model_dump() if usage is not None else {},
+        timings=dict(extra.get("timings") or {}),
+    )
+
+
+def build_chat_providers(
+    settings: Any, *, http_client_factory: Callable[[str], httpx.Client] | None = None
+) -> list[OpenAIChatProvider]:
+    """Providers in settings order, skipping those without a key."""
+    providers = []
+    router = settings.router
+    for name in settings.enabled_providers():
+        endpoint = router.endpoint(name)
+        key = settings.api_key(name)
+        if not key:
+            continue
+        http_client = http_client_factory(name) if http_client_factory else None
+        client = make_openai_client(endpoint.base_url, key, http_client=http_client)
+        providers.append(
+            OpenAIChatProvider(
+                name,
+                client,
+                endpoint.model,
+                timeout_s=router.timeout_s(name),
+                max_retries=router.max_retries,
+                reasoning_effort=endpoint.reasoning_effort,
+            )
+        )
+    return providers

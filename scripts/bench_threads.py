@@ -7,7 +7,6 @@ faster-whisper (extra [stt-whisper]) runs at each thread count (cpu_threads); Mo
 thread setting, so it is measured with onnxruntime's default and with one thread
 (MOONSHINE_ORT_SINGLE_THREAD=1) for reference. Every configuration runs in its own process so
 thread pools never mix. Never 12: logical-thread counts make inference slower (docs/PLAN.md 2).
-The LLM (llama-server) joins this benchmark in M6.
 
 Run on mains power, Windows power mode "Best performance", nothing else heavy running.
 """
@@ -110,7 +109,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--audio-dir", type=Path, default=None)
     parser.add_argument("--limit", type=int, default=20, help="recordings per configuration")
     parser.add_argument("--save", action="store_true")
-    parser.add_argument("--llm", action="store_true", help="also llama-server (from M6)")
     args = parser.parse_args(argv)
     use_utf8_output()
 
@@ -147,8 +145,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  moonshine {arch} threads {label}: {r['latency_ms']:.0f} ms after end of audio, "
               f"RTF {r['rtf']:.3f}")  # fmt: skip
         rows.append(row(f"moonshine {arch}", label, r))
-    if args.llm:
-        print("  LLM: llama-server arrives in M6; nothing to benchmark yet")
 
     lines = [
         f"Run {stamp()}. {len(files)} recordings from "

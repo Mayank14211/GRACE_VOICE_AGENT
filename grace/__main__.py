@@ -132,7 +132,8 @@ def run(settings: Settings, args: argparse.Namespace) -> int:
     app = _create_qt_app(rt.overlay and not args.no_overlay)
 
     bus = EventBus()
-    provider = "gemini" if "gemini" in settings.enabled_providers() else "offline"
+    enabled = settings.enabled_providers()
+    provider = enabled[0] if enabled else "offline"  # the chip shows the one that last answered
     state = AppState(bus, max_turns=rt.history_turns, mic_on=rt.mic_on_at_start, provider=provider)
     metrics = (
         MetricsLog(session_path(), secrets=settings.secret_values())
@@ -274,13 +275,17 @@ def _build_voice(
     missing) leaves GRACE running with gestures and hotkeys, and says why."""
     from grace.actions.executor import ExecutorRegistry
     from grace.core.bus import PARTIAL
+    from grace.core.quota import build_governor
     from grace.input.voice import (
         VoiceHooks,
         VoiceUnavailable,
         build_voice_worker,
         stt_event_fields,
     )
-    from grace.legacy_voice import GraceVoiceAgent, build_assistant
+    from grace.intent.assistant import build_extras
+    from grace.intent.dialogue import Dialogue
+    from grace.intent.router import build_router
+    from grace.legacy_voice import GraceVoiceAgent
     from tts import TextToSpeech
 
     tts = TextToSpeech()
@@ -289,12 +294,35 @@ def _build_voice(
     if args.speech_rate != 170:
         tts.change_rate(args.speech_rate)
     voice_ref: list[Any] = []
-    assistant = build_assistant(settings, ExecutorRegistry(registry, executor, "router"))
+    router_registry = ExecutorRegistry(registry, executor, "router")
+
+    def quota_warning(key: str, counter: str, fraction: float) -> None:
+        metrics.write("quota_warning", key=key, counter=counter, pct=round(fraction * 100))
+        replied(f"Heads up: {key.split(':')[0]} is at {fraction:.0%} of its free {counter} limit.")
+
+    quota = build_governor(settings, on_warning=quota_warning)
+    extras = build_extras(settings, router_registry, quota=quota)
+    router = build_router(
+        settings,
+        registry,
+        search=extras.offers_search,
+        images=extras.offers_images,
+        quota=quota,
+        metrics=metrics,
+        on_provider=lambda name: state.update(provider=name),
+    )
+    extras.analyst = router  # code analysis runs the chain without Gemini
+    r = settings.router
+    dialogue = Dialogue(
+        max_turns=r.history_turns, memory_reset_s=r.memory_reset_s, followup_s=r.followup_s
+    )
     agent = GraceVoiceAgent(
         confirm_hotkey=settings.hotkeys.confirm,
         registry=ExecutorRegistry(registry, executor, "grammar"),
         tts=tts,
-        assistant=assistant,
+        router=router,
+        extras=extras,
+        dialogue=dialogue,
         wake_word=args.wake_word or settings.runtime.wake_word,
         on_heard=heard,
         on_reply=replied,
@@ -302,8 +330,7 @@ def _build_voice(
         on_end_session=lambda: voice_ref[0].pipeline.end_session() if voice_ref else None,
         on_exit=lambda: runtime_ref[0].request_quit("voice"),
     )
-    if assistant is not None:
-        assistant.notify = agent._say  # "Searching the web." while a slow tool runs
+    extras.notify = agent._say  # "Searching the web." while a slow tool runs
 
     def on_wake(score: float | None) -> None:
         earcons.play("wake")

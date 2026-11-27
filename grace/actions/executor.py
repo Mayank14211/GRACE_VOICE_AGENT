@@ -236,6 +236,12 @@ class ExecutorRegistry:
         intent = Intent(name, dict(args or {}), source=self._source)  # type: ignore[arg-type]
         return self._executor.call(intent, confirmed=confirmed)
 
+    def for_source(self, source: str) -> ExecutorRegistry:
+        """The same facade, tagging its actions with another source (router, followup)."""
+        if source == self._source:
+            return self
+        return ExecutorRegistry(self._registry, self._executor, source)
+
     def __contains__(self, name: object) -> bool:
         return name in self._registry
 

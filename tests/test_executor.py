@@ -205,3 +205,24 @@ def test_release_all_releases_only_what_grace_holds() -> None:
     result = registry.execute("input.release_all")
     assert result.data["released"] == ["left"] and b.input.calls == [("mouse_up", "left")]
     assert registry.execute("input.release_all").data["released"] == []
+
+
+def test_dispatcher_tags_actions_with_the_intent_source() -> None:
+    from grace.actions.confirmation import ConfirmationGate, Dispatcher
+    from grace.actions.executor import ExecutorRegistry
+
+    registry, b = create_fake_registry()
+    sources: list[str] = []
+    ex = ActionExecutor(registry, lambda i, r: sources.append(i.source)).start()
+    try:
+        facade = ExecutorRegistry(registry, ex, source="grammar")
+        assert facade.for_source("grammar") is facade
+        gate = ConfirmationGate(facade, say=lambda m: None, start_timer=None)
+        dispatcher = Dispatcher(facade, gate, say=lambda m: None)
+        dispatcher.handle(Intent("volume.set", {"level": 30}, source="router"))
+        dispatcher.handle(Intent("volume.step", {"delta": 5}, source="followup"))
+        dispatcher.handle(Intent("system.sleep", source="router"))
+        gate.confirm()
+    finally:
+        ex.stop()
+    assert sources == ["router", "followup", "router"] and b.power.calls == ["sleep"]

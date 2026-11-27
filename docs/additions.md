@@ -59,4 +59,34 @@ Statuses: `Pending` (wanted, not scheduled) · `Planned (SNN)` (scheduled for a 
   - The camera is only open while gestures are on (`GestureLoop`); a button must never open or
     close it directly, only call `Runtime`.
 
-<!-- Add new entries above this line. Next ID: A-003 -->
+### A-003: Cloud-first router: no local LLM, our own tools, quota governor
+
+- **Date / status:** 2026-11-26 · Done (S07) for the router; the STT side (Groq Whisper default,
+  Moonshine as the optional `[stt-local]` extra) belongs to S06b.
+- **Request:** the team's architecture decision of 2026-11-26. No local LLM (llama.cpp / Gemma).
+  The LLM chain is Groq gpt-oss-20b -> Gemini Flash-Lite -> OpenRouter `:free`. The router is a
+  stateless orchestrator that keeps the dialogue itself. `web_search` (one free search API) and
+  `generate_image` (Cloudflare Workers AI FLUX.1 schnell) are our own tools; Gemini search
+  grounding and image generation are out (billing). Risky actions are never tools. A quota
+  governor tracks requests and tokens per provider and model, and warns at 80 %.
+- **Where:** `grace/intent/router.py`, `tools.py`, `search.py` (Tavily, choice in
+  `docs/results/search.md`), `images.py`, `assistant.py` (`Extras`), `grace/core/cooldown.py`,
+  `grace/core/quota.py`; settings `router:`, `images:`, `search:`; keys `CLOUDFLARE_ACCOUNT_ID`,
+  `CLOUDFLARE_API_TOKEN`, `TAVILY_API_KEY`.
+- **Deviations:** Gemini chat uses its OpenAI-compatible endpoint, not the S03 Interactions
+  client (team choice in the S07 continuation). Gemini's timeout is 6 s, not 3 s (measured
+  free-tier tail).
+- **Constraints for other work:**
+  - New router tools are executed by our code. The model only emits calls; add the executor
+    to `Extras` and a single-action tool in `grace/intent/tools.py`.
+  - Registry actions named `notifications.*` (S09) appear in the `notifications` tool group
+    automatically; don't add a separate tool.
+  - Every cloud call goes through `grace/core/quota.py` (`allow` before, `record` after) and
+    has a timeout. S06b's `grace/input/stt/budget.py` must share this store (TODO in quota.py)
+    rather than build a second one.
+  - Screen text and selected code never go to Gemini: use `Router.complete(...,
+    exclude={"gemini"})`.
+  - Nothing may store conversation state on a provider (no server-side ids); history lives in
+    `grace/intent/dialogue.py`.
+
+<!-- Add new entries above this line. Next ID: A-004 -->

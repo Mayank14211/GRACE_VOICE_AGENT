@@ -25,7 +25,7 @@ gestures** (webcam), at the same time, with **global hotkeys** as the reliable f
 Rules that follow from the hardware:
 
 - **Inference threads are a setting** (`inference.threads` in `settings.yaml`).
-  Defaults: 4 on the i5-12450H (P-cores only; E-cores often slow llama.cpp down),
+  Defaults: 4 on the i5-12450H (P-cores only; E-cores often slow CPU inference down),
   6 on the Ryzen 5 5500U. Benchmark 4 / 6 / 8 once with `scripts/bench_threads.py` and keep the fastest.
 - Never use logical-thread counts (12) for inference.
 - Run performance tests on mains power with Windows power mode set to "Best performance".
@@ -80,7 +80,7 @@ Rules that follow from the hardware:
             │        │ no                                       │
             │        ▼                                          │
             │ intent/router.py → providers: groq → gemini →     │
-            │                    openrouter → local llama-server│
+            │   openrouter (cloud); tools: web_search, images   │
             └───────────────────────┬──────────────────────────┘
                                     │ Intent (validated)
             ┌───────────────────────▼──────────────────────────┐
@@ -115,7 +115,7 @@ grace/
   ui/overlay.py
   feedback/{tts,earcons}.py
   metrics/log.py
-scripts/  doctor.py, eval_stt.py, bench_threads.py, report.py, demo_check.py, run_llama_server.ps1
+scripts/  doctor.py, eval_stt.py, eval_router.py, bench_threads.py, report.py, demo_check.py
 models/   (git-ignored; downloaded with hash checks)
 tests/    unit tests + fixtures (gestures/*.json, audio/*.wav)
 docs/     PLAN.md, wakeword.md, demo_script.md, results/
@@ -134,8 +134,9 @@ docs/     PLAN.md, wakeword.md, demo_script.md, results/
 | Wake word | `openwakeword`, custom .onnx | Offline, tiny, trainable |
 | STT local | `moonshine-voice` Small Streaming (English) | ~165 ms vs ~3.4 s for Whisper Small on x86 CPU |
 | STT fallback | `faster-whisper` base int8; Groq `whisper-large-v3-turbo` | Hindi/Hinglish, accurate dictation |
-| LLM client | `openai` SDK for Groq, Gemini (OpenAI-compatible endpoint), OpenRouter, local `llama-server` | One code path; provider swap by config |
-| Local LLM | llama.cpp `llama-server` + Gemma-4-E4B Q4_K_M | Best CPU tool-calling accuracy in research; separate process |
+| LLM client | `openai` SDK for Groq, Gemini (OpenAI-compatible endpoint), OpenRouter | One code path; provider swap by config. No local LLM (2026-11-26) |
+| Images | Cloudflare Workers AI FLUX.1 [schnell] (REST, pinned httpx) | Free 10,000 neurons/day; run by our code |
+| Web search | Tavily (REST, pinned httpx), our own `web_search` tool | Free 1,000 credits/month, no card (docs/results/search.md) |
 | Gestures | `mediapipe` + `opencv-python` | Real-time on CPU |
 | Volume / brightness | `pycaw` + `comtypes`; `screen-brightness-control` | Exact control; replaces WMI/key hacks |
 | Notifications | `winsdk` UserNotificationListener | Real toast data, no OCR |
@@ -156,7 +157,15 @@ Only unmatched or conversational input goes to the router.
 | Groq | `openai/gpt-oss-20b` (LLM), `whisper-large-v3-turbo` (STT) | LLM: 30 req/min, 1,000/day, 200K tokens/day. Whisper: 20 req/min, 2,000/day, 28,800 audio-s/day. No card | Primary cloud |
 | Google Gemini | Flash-Lite (current ID from docs) | Per-project, visible only in AI Studio; free-tier inputs may be used for training | Backup LLM; never send private screen text |
 | OpenRouter | a `:free` model | 20 req/min, 50/day | Last resort |
-| Local | Gemma-4-E4B Q4_K_M via llama-server | Unlimited; ~9–10 tokens/s on a 4-core AVX2 CPU (benchmark, not our machine) | Offline + demo mode |
+| Cloudflare Workers AI | `@cf/black-forest-labs/flux-1-schnell` | 10,000 neurons/day (~58 per image at 4 steps) | `generate_image` tool |
+| Tavily | search API | 1,000 credits/month (1 per basic search) | `web_search` tool |
+
+**Decisions of 2026-11-26 (cloud-first):** no local LLM (no llama.cpp / Gemma); the LLM chain is
+groq → gemini → openrouter. The router is a stateless orchestrator: it keeps the dialogue and
+sends it with the tool list on every call, so any provider can take over mid-conversation. Tools
+(registry actions, `web_search`, `generate_image`) run in our code; risky actions are never
+exposed as tools. No Gemini search grounding or image generation (billing). A quota governor
+counts requests, tokens and tool units per provider and model, and warns at 80 %.
 
 **Added early (2026-11-21, on the team's request, before S07):** a Gemini assistant in
 `grace/intent/assistant.py` + `providers.py` answers unmatched speech in the legacy `main.py` loop:
@@ -169,9 +178,20 @@ team uses a billing-enabled key. S07 should fold this into the router's provider
 build a second Gemini client. Image generation re-enters scope by team decision (section 5 had
 removed it).
 
-Router behaviour: 3 s timeout (cloud), 15 s (local); HTTP 429/error → provider cooldown 60 s → next.
-Keep system prompt + tool list byte-identical across calls so llama-server reuses its prompt cache.
-Expose 8–10 grouped tools, not one per command. Demo mode pins provider order to `[local]`.
+**Done in S07 (2026-11-26, reconciled with the decisions above):** all three providers go through
+one OpenAI-compatible path (`grace/intent/router.py`, `providers.py`); Gemini uses its OpenAI
+endpoint there (team decision in the S07 continuation: the S03 Interactions client stays in
+`providers.py` but the router doesn't use it). Search: `grace/intent/search.py` (Tavily). Images:
+`grace/intent/images.py` (Cloudflare, prompt filter). Code analysis runs the chain without
+Gemini, so screen text never reaches Gemini. Cooldowns: `grace/core/cooldown.py`; quotas:
+`grace/core/quota.py` (TODO: share one store with S06b's `grace/input/stt/budget.py`).
+Removed settings (`router.local*`, `router.allow_risky`, the `gemini:` section) fail with a
+message naming their replacement.
+
+Router behaviour: 3 s timeout (Gemini 6 s: its free-tier tail); HTTP 429/error → provider cooldown 60 s → next; invalid tool call
+→ one retry → next provider → "please rephrase". Keep system prompt + tool list byte-identical
+across calls (provider prompt caches). Expose 8–10 grouped tools, not one per command. Demo mode
+does not change the router.
 
 ## 7. Gesture map (default; editable in settings.yaml)
 
