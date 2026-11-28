@@ -151,11 +151,26 @@ class WakeWordSettings(_Section):
 SttEngineName = Literal["moonshine", "whisper_local", "groq"]
 
 
-class SttSettings(_Section):
-    """grace/input/stt: which engine turns speech into text.
+class SttQuota(_Section):
+    """Groq Whisper free tier (console.groq.com/docs/rate-limits, checked 2026-11-28; your own
+    limits: console.groq.com/settings/limits). Counted per model. Groq bills at least
+    ``min_billed_s`` of audio per request, so a 2 s command counts as 10 s. None = not limited
+    by GRACE. The governor (grace/core/quota.py) warns at 80 % and skips Groq at 100 %."""
 
-    engine auto: language en -> moonshine; language hi / auto, or dictation with
-    dictation_accurate -> groq if GROQ_API_KEY is set and it answered recently, else whisper_local.
+    rpm: int | None = Field(20, ge=1)
+    rpd: int | None = Field(2000, ge=1)
+    audio_s_per_hour: int | None = Field(7200, ge=1)
+    audio_s_per_day: int | None = Field(28_800, ge=1)
+    min_billed_s: float = Field(10.0, ge=0.0, le=60.0)
+
+
+class SttSettings(_Section):
+    """grace/input/stt: which engine turns speech into text. Cloud-first since S06b (2026-11-26).
+
+    engine auto: commands -> groq (key set, under quota, not cooling down), then moonshine (extra
+    [stt-local]), then whisper_local (extra [stt-whisper]). Dictation, or language hi / auto ->
+    groq, then whisper_local, then moonshine (English only). demo_mode -> moonshine first (no
+    network needed on stage), then groq.
     """
 
     engine: Literal["auto", "moonshine", "whisper_local", "groq"] = "auto"
@@ -164,10 +179,17 @@ class SttSettings(_Section):
     )
     update_interval_s: float = Field(0.3, ge=0.1, le=2.0)  # how often partial text refreshes
     whisper_model: Literal["tiny", "base", "small"] = "base"  # faster-whisper, int8, beam 1
-    dictation_accurate: bool = False  # dictation via groq / whisper_local instead of moonshine
+    # Kept so existing settings files still load. Since S06b dictation always tries groq first,
+    # so this no longer changes anything.
+    dictation_accurate: bool = False
     groq_model: str = "whisper-large-v3-turbo"
     groq_timeout_s: float = Field(8.0, gt=0.0, le=60.0)
     partials: bool = True  # show partial text on the overlay while the user speaks
+    # Upload minimisation (cloud engines only): VAD speech plus this much audio on each side...
+    upload_padding_ms: int = Field(200, ge=0, le=1000)
+    # ...and utterances with less speech than this are never sent (clicks, coughs, short taps).
+    upload_min_speech_ms: int = Field(300, ge=0, le=2000)
+    quota: SttQuota = Field(default_factory=SttQuota)
 
 
 GesturePose = Literal[

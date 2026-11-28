@@ -69,17 +69,35 @@ wakeword:
                                          # (0 = wake word before every command)
 
 stt:
-  # Speech to text. auto: English -> moonshine (offline, streaming).
-  # Hindi / auto language, or dictation with dictation_accurate -> groq when GROQ_API_KEY is set
-  # and online, else whisper_local (needs: uv sync --extra stt-whisper).
+  # Speech to text. Cloud-first: Groq Whisper (needs GROQ_API_KEY in .env) is the default.
+  # Optional local engines: moonshine (English, uv sync --extra stt-local, then
+  # scripts/fetch_models.py --stt-local) and whisper_local (uv sync --extra stt-whisper).
+  # auto: commands -> groq, then moonshine, then whisper_local.
+  #       dictation, or language hi / auto -> groq, then whisper_local, then moonshine (English).
+  #       demo_mode: true -> moonshine first (no network needed on stage), then groq.
+  # Without network or quota GRACE says "Voice: local mode (offline)" if a local engine is
+  # installed, else "Voice offline: gestures and hotkeys still work". See docs/privacy.md.
   engine: auto                    # auto | moonshine | whisper_local | groq
   moonshine_model: small-streaming  # tiny-streaming (fastest) | small-streaming | medium-streaming
   update_interval_s: 0.3          # how often the partial text on the overlay refreshes
   whisper_model: base             # faster-whisper model: tiny | base | small (int8, beam 1)
-  dictation_accurate: false       # true = dictate with groq / whisper_local instead of moonshine
+  dictation_accurate: false       # no effect since S06b (dictation always tries groq first)
   groq_model: whisper-large-v3-turbo
-  groq_timeout_s: 8.0             # per request; on failure GRACE falls back to whisper_local
+  groq_timeout_s: 8.0             # per request; on failure GRACE falls back to a local engine
   partials: true                  # show what you are saying on the overlay while you speak
+  # Upload minimisation (cloud engines only): detected speech plus this much audio on each side
+  # is sent, and utterances with less speech than upload_min_speech_ms are never sent.
+  upload_padding_ms: 200
+  upload_min_speech_ms: 300
+  # Groq Whisper free tier, counted per model (console.groq.com/settings/limits shows yours).
+  # GRACE warns at 80 % and uses a local engine (or goes voice-offline) at 100 % until the
+  # hour / UTC day resets. Counts survive restarts (logs/quota.json). null = not limited.
+  quota:
+    rpm: 20                       # requests per minute
+    rpd: 2000                     # requests per day
+    audio_s_per_hour: 7200
+    audio_s_per_day: 28800
+    min_billed_s: 10.0            # Groq bills every request as at least 10 s of audio
 
 gestures:
   # Try them without the full app: uv run python -m grace.input.gestures --dry-run
