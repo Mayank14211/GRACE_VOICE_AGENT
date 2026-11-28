@@ -13,11 +13,13 @@ import numpy as np
 import pytest
 
 from grace.input.audio import FRAME, FRAME_S, Segmenter
+from grace.input.stt import moonshine_installed
 from grace.input.stt.fake import FakeStt
 from grace.input.voice import (
     ListenPipeline,
     SerialWorker,
     SttWorker,
+    UploadPolicy,
     VoiceWorker,
     split_wake_word,
     strip_leading_wake_word,
@@ -347,14 +349,14 @@ def test_push_to_talk_strips_a_wake_word_said_anyway() -> None:
 
 
 def test_push_to_talk_takes_over_an_utterance_in_progress() -> None:
-    # The cancelled capture is still transcribed (its text is thrown away), then the key's.
-    h = Harness(["listen volume 99", "volume 15"])
+    # The cancelled capture is never transcribed (S06b upload guard), only the key's.
+    h = Harness(["volume 15"])
     h.feed(SPEECH, 2)  # VAD opened a wake check
     h.p.ptt_down()
     h.feed(SPEECH, 8)
     h.p.ptt_up()
     h.run_stt()
-    assert h.commands == ["volume 15"]
+    assert h.commands == ["volume 15"] and len(h.engine.utterances) == 1
 
 
 def test_push_to_talk_silence_does_nothing() -> None:
@@ -561,9 +563,145 @@ def test_serial_worker_survives_a_failing_job() -> None:
     worker.stop()
 
 
+# --------------------------------------------------------------------------- upload minimisation
+# Harness: frames are 32 ms; Segmenter(end_of_speech_ms=96, min_speech_ms=64, pre_roll_ms=64), so
+# an utterance carries 2 pre-roll frames and 3 trailing silent frames.
+PAD_1 = UploadPolicy(padding_ms=32, min_speech_ms=300)  # 1 frame of padding each side
+
+
+def cloud(texts: list[str] | None = None) -> FakeStt:
+    """Stands in for Groq: a batch engine that uploads. ``utterances`` = what was sent."""
+    return FakeStt(texts or [], name="groq", uploads=True, streaming=False)
+
+
+def cloud_harness(texts: list[str], policy: UploadPolicy = PAD_1, **kw) -> Harness:
+    h = Harness(engine=cloud(texts), wake_mode="off", **kw)
+    h.stt = SttWorker(lambda d: h.engine, lambda: h.p, policy=policy,
+                      on_command=lambda u, t: h.commands.append(t),
+                      on_unavailable=h.problems.append)  # fmt: skip
+    return h
+
+
+def test_only_speech_plus_padding_is_sent() -> None:
+    h = cloud_harness(["volume 30"])
+    quiet_lead = np.full(FRAME, 0.01, dtype=np.float32)  # under the fake VAD's threshold
+    h.feed(quiet_lead, 4)  # pre-roll keeps the last 2 of these
+    h.say(12)  # 12 speech frames, then silence ends it after 3 frames
+    (sent,) = h.engine.utterances
+    # 1 frame of pre-roll + 12 speech + 1 frame of trailing silence
+    assert len(sent) == (1 + 12 + 1) * FRAME
+    assert h.commands == ["volume 30"]
+
+
+def test_a_segment_with_too_little_speech_is_never_sent() -> None:
+    h = cloud_harness(["mm"])
+    h.say(8)  # 8 x 32 ms = 256 ms of speech < 300 ms
+    assert h.engine.utterances == [] and h.commands == [] and h.problems == []
+    assert h.p._pending == 0
+    h.engine._texts = ["volume 30"]
+    h.say(10)  # 320 ms
+    assert len(h.engine.utterances) == 1 and h.commands == ["volume 30"]
+
+
+def test_a_local_engine_still_gets_short_segments() -> None:
+    h = Harness(["yes"])  # FakeStt without uploads: the upload guard does not apply
+    h.p.wake_mode = "off"
+    h.p.phase = "active"
+    h.say(4)  # 128 ms of speech: over the segmenter's 64 ms, under the 300 ms upload floor
+    assert len(h.engine.utterances) == 1
+
+
+def test_nothing_is_sent_when_the_mic_goes_off_mid_utterance() -> None:
+    h = cloud_harness(["never"])
+    h.feed(SPEECH, 20)  # capturing
+    h.p.cancel()  # Ctrl+Alt+M / panic
+    h.feed(SILENCE, 5)
+    h.run_stt()
+    assert h.engine.utterances == [] and h.commands == []
+
+
+def test_nothing_is_sent_while_the_mic_is_off() -> None:
+    h = cloud_harness(["never"])
+    source = FakeSource([SPEECH] * 20 + [SILENCE] * 5)
+    w, _ = worker_for(h, source, [False])
+    for _ in range(30):
+        w.step()
+    h.run_stt()
+    assert source.opened == 0 and h.jobs == [] and h.engine.utterances == []
+
+
+def test_push_to_talk_sends_only_what_was_said_while_the_key_was_held() -> None:
+    h = cloud_harness(["volume 15"], policy=UploadPolicy(padding_ms=0, min_speech_ms=300))
+    source = FakeSource([SPEECH] * 12)
+    w, _ = worker_for(h, source, [False])
+    w.request_ptt()  # mic off: opens just for the key
+    for _ in range(13):
+        w.step()
+    w.release_ptt()
+    source.frames = [SPEECH] * 10  # said after the key came up
+    for _ in range(11):
+        w.step()
+    h.run_stt()
+    assert not source.is_open
+    (sent,) = h.engine.utterances
+    assert len(sent) == 12 * FRAME and h.commands == ["volume 15"]
+
+
+def test_a_push_to_talk_tap_is_not_sent() -> None:
+    h = cloud_harness(["never"], policy=UploadPolicy(padding_ms=0, min_speech_ms=300))
+    h.p.ptt_down()
+    h.feed(SPEECH, 5)  # 160 ms
+    h.p.ptt_up()
+    h.run_stt()
+    assert h.engine.utterances == []
+
+
+def test_push_to_talk_lead_in_from_before_the_key_is_cut_to_the_padding() -> None:
+    h = cloud_harness(["volume 15"])  # 1 frame of padding
+    h.p.wake_mode = "model"  # idle: frames only go to the recent buffer
+    h.p.wake = h.wake
+    h.p.phase = "idle"
+    h.feed(SILENCE, 3)  # ptt pre-roll keeps these (96 ms)
+    h.p.ptt_down()
+    h.feed(SPEECH, 10)
+    h.p.ptt_up()
+    h.run_stt()
+    (sent,) = h.engine.utterances
+    assert len(sent) == (1 + 10) * FRAME
+
+
+def test_the_wake_word_model_never_submits_audio() -> None:
+    h = Harness(wake_mode="model")
+    h.feed(SPEECH, 50)  # speech, but no wake word: only openWakeWord (on this PC) hears it
+    h.feed(SILENCE, 10)
+    assert h.jobs == [] and h.wake.frames == 60
+
+
+def test_wake_checks_use_the_local_engine_when_there_is_one() -> None:
+    local = FakeStt(["listen volume 30"], name="moonshine")
+    h = Harness(engine=cloud(["never"]))  # text wake mode: idle utterances are wake checks
+    h.stt = SttWorker(lambda d: h.engine, lambda: h.p, engine_for_wake=lambda: local,
+                      on_command=lambda u, t: h.commands.append(t))  # fmt: skip
+    h.say(12)
+    assert h.commands == ["volume 30"] and h.engine.utterances == []
+    assert len(local.utterances) == 1
+
+
+def test_upload_chunks_raises_for_a_cancelled_utterance_even_for_local_engines() -> None:
+    from grace.input.stt.base import UtteranceCancelled
+    from grace.input.voice import Utterance, upload_chunks
+
+    utt = Utterance("command", 0)
+    utt.put(SPEECH)
+    utt.cancel()
+    with pytest.raises(UtteranceCancelled):
+        list(upload_chunks(utt, FakeStt(), UploadPolicy()))
+
+
 # --------------------------------------------------------------------------- real models
 @pytest.mark.skipif(
-    not moonshine_dir("small-streaming").is_dir(), reason="run scripts/fetch_models.py"
+    not (moonshine_installed() and moonshine_dir("small-streaming").is_dir()),
+    reason="needs uv sync --extra stt-local and scripts/fetch_models.py --stt-local",
 )
 def test_real_vad_and_moonshine_find_both_commands() -> None:
     from pathlib import Path

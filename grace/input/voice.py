@@ -23,6 +23,18 @@ What the user experiences (``wakeword`` settings):
 ``cancel`` (mic off, panic) drops the utterance being captured and any text still on its way:
 a generation counter makes late results harmless. ``Runtime`` only calls ``wake``,
 ``request_ptt``, ``release_ptt``, ``cancel`` and ``stop`` (grace.runtime.VoiceControl).
+
+Upload minimisation (S06b, docs/privacy.md). For an engine that sends audio off the machine
+(``uploads``: Groq), ``upload_chunks`` sits between the utterance and the engine:
+
+    - only VAD-confirmed utterances reach it (or push-to-talk while the key is held), and only
+      while the mic is open: the mic is closed while it is off and push-to-talk is up;
+    - pre-roll and trailing silence are cut to ``stt.upload_padding_ms`` (200 ms) on each side;
+    - an utterance with less than ``stt.upload_min_speech_ms`` (300 ms) of speech is not sent;
+    - a cancelled utterance (mic off, panic, a key press that took over) is not sent: the chunk
+      iterator raises UtteranceCancelled before a batch engine has its audio;
+    - the wake-word model (openWakeWord) runs on this PC and never submits audio; in text wake
+      mode the check prefers a local engine (``engine_for_wake``).
 """
 
 from __future__ import annotations
@@ -41,7 +53,7 @@ from typing import Any, Literal
 import numpy as np
 
 from grace.input.audio import FRAME_S, AudioSource, SegmentEnd, Segmenter, VadModel
-from grace.input.stt.base import Final, Partial, SttEngine, SttError
+from grace.input.stt.base import Final, Partial, SttEngine, SttError, UtteranceCancelled, uploads
 from grace.input.wakeword import WakeWordDetector
 
 log = logging.getLogger(__name__)
@@ -101,14 +113,19 @@ class Utterance:
     end_reason: str = ""
     cancelled: bool = False
     frames: int = 0
+    lead_frames: int = 0  # frames from before speech started (VAD pre-roll / before the key)
+    voiced_ms: float | None = None  # speech the VAD counted (None: push-to-talk, no VAD)
     _q: queue.Queue[Any] = field(default_factory=queue.Queue, repr=False)
 
     def put(self, frame: np.ndarray) -> None:
         self.frames += 1
         self._q.put(frame)
 
-    def end(self, t: float, reason: str, hangover_s: float = 0.0) -> None:
+    def end(
+        self, t: float, reason: str, hangover_s: float = 0.0, voiced_ms: float | None = None
+    ) -> None:
         self.eos_t, self.end_reason, self.hangover_s = t, reason, hangover_s
+        self.voiced_ms = voiced_ms
         self._q.put(_END)
 
     def cancel(self) -> None:
@@ -125,6 +142,58 @@ class Utterance:
     @property
     def duration_s(self) -> float:
         return self.frames * FRAME_S
+
+    @property
+    def speech_ms(self) -> float:
+        """Speech in it: what the VAD counted, or for push-to-talk the time the key was held."""
+        if self.voiced_ms is not None:
+            return self.voiced_ms
+        return max(0, self.frames - self.lead_frames) * FRAME_S * 1000
+
+
+@dataclass(frozen=True)
+class UploadPolicy:
+    """stt.upload_padding_ms / stt.upload_min_speech_ms (grace/config.py)."""
+
+    padding_ms: int = 200
+    min_speech_ms: int = 300
+
+    @property
+    def padding_frames(self) -> int:
+        return max(0, round(self.padding_ms / 1000 / FRAME_S))
+
+
+def upload_chunks(
+    utt: Utterance, engine: SttEngine, policy: UploadPolicy | None
+) -> Iterator[np.ndarray]:
+    """The utterance's frames as ``engine`` may see them. Raises UtteranceCancelled when it was
+    cancelled, or (uploading engines) when it has too little speech to be worth sending.
+
+    Uploading batch engines (Groq) get speech plus ``padding_ms`` each side, all at the end of the
+    utterance (they wait for the end anyway). An uploading streaming chain (demo mode:
+    moonshine>groq) gets the leading trim only, so partials are not delayed.
+    """
+    if policy is None or not uploads(engine):
+        yield from utt.chunks()
+        if utt.cancelled:
+            raise UtteranceCancelled("cancelled")
+        return
+    pad = policy.padding_frames
+    skip = max(0, utt.lead_frames - pad)
+    held: list[np.ndarray] = []
+    for i, frame in enumerate(utt.chunks()):
+        if i < skip:
+            continue
+        if engine.streaming:
+            yield frame
+        else:
+            held.append(frame)
+    if utt.cancelled:
+        raise UtteranceCancelled("cancelled")
+    if utt.speech_ms < policy.min_speech_ms:
+        raise UtteranceCancelled(f"{utt.speech_ms:.0f} ms of speech: too short to send")
+    drop = max(0, round(utt.hangover_s / FRAME_S) - pad)
+    yield from held[: len(held) - drop] if drop else held
 
 
 def stt_event_fields(utt: Utterance, final: Final) -> dict[str, Any]:
@@ -218,8 +287,10 @@ class ListenPipeline:
             self._listening = on
             self._on_listening(on)
 
-    def _start(self, kind: Kind, audio: tuple[np.ndarray, ...] | list[np.ndarray]) -> Utterance:
-        utt = Utterance(kind, self.gen, started=self._clock())
+    def _start(
+        self, kind: Kind, audio: tuple[np.ndarray, ...] | list[np.ndarray], lead: int
+    ) -> Utterance:
+        utt = Utterance(kind, self.gen, started=self._clock(), lead_frames=lead)
         for frame in audio:
             utt.put(frame)
         self._open = utt
@@ -295,7 +366,7 @@ class ListenPipeline:
                     if dictation
                     else "command"
                 )
-                self._start(kind, step.audio)
+                self._start(kind, step.audio, lead=len(step.audio) - 1)  # pre-roll + 1st voiced
                 self._publish_listening()
             elif self._open is not None:
                 for f in step.audio:
@@ -311,7 +382,7 @@ class ListenPipeline:
         if end.too_short:
             utt.cancel()
         else:
-            utt.end(now, end.reason, end.t - end.speech_end_t)
+            utt.end(now, end.reason, end.t - end.speech_end_t, end.voiced_ms)
         self._publish_listening()
 
     def tick(self, now: float | None = None) -> None:
@@ -361,7 +432,7 @@ class ListenPipeline:
                 # The key wins: what was being captured is re-captured from the recent audio.
                 self._cancel_open()
             self.seg.reset()
-            self._start("ptt", list(self._recent))
+            self._start("ptt", list(self._recent), lead=len(self._recent))
             self._publish_listening()
 
     def ptt_up(self) -> None:
@@ -439,7 +510,9 @@ class ListenPipeline:
 class SttWorker:
     """Transcribes utterances one at a time on its own thread (``run`` is the synchronous core).
 
-    ``engine_for(dictation)`` picks the engine per utterance (grace.input.stt.SttRouter).
+    ``engine_for(dictation)`` picks the engine per utterance (grace.input.stt.SttRouter);
+    ``engine_for_wake()`` (optional) the one for wake-word checks, which prefers local engines.
+    ``policy`` applies the upload guards (``upload_chunks``); None turns them off (tests only).
     """
 
     def __init__(
@@ -452,8 +525,12 @@ class SttWorker:
         on_final: Callable[[Utterance, Final], None] = lambda u, f: None,
         on_unavailable: Callable[[str], None] = lambda why: None,
         name: str = "grace-stt",
+        policy: UploadPolicy | None = UploadPolicy(),  # noqa: B008 - frozen, shared safely
+        engine_for_wake: Callable[[], SttEngine | None] | None = None,
     ) -> None:
         self._engine_for = engine_for
+        self._engine_for_wake = engine_for_wake
+        self._policy = policy
         self._pipeline = pipeline_ref
         self._on_partial = on_partial
         self._on_command = on_command
@@ -477,14 +554,17 @@ class SttWorker:
     def run(self, utt: Utterance) -> None:
         pipeline = self._pipeline()
         try:
-            engine = self._engine_for(utt.kind == "dictation")
+            if utt.kind == "wake_check" and self._engine_for_wake is not None:
+                engine = self._engine_for_wake()
+            else:
+                engine = self._engine_for(utt.kind == "dictation")
             if engine is None:
                 for _ in utt.chunks():
                     pass
                 if not utt.cancelled:
                     self._on_unavailable("no speech-to-text engine is available")
                 return
-            for event in engine.transcribe_stream(utt.chunks()):
+            for event in engine.transcribe_stream(upload_chunks(utt, engine, self._policy)):
                 if isinstance(event, Partial):
                     if utt.kind != "wake_check" and pipeline.is_current(utt):
                         self._hook(self._on_partial, utt, event.text)
@@ -495,6 +575,8 @@ class SttWorker:
                 command = pipeline.handle_final(utt, event.text)
                 if command:
                     self._on_command(utt, command)
+        except UtteranceCancelled as why:
+            log.debug("utterance %d not transcribed: %s", utt.id, why)
         except SttError as exc:
             log.warning("speech to text failed: %s", exc)
             if not utt.cancelled:
@@ -685,20 +767,32 @@ class VoiceHooks:
     wake: Callable[[float | None], None] = lambda score: None  # earcon, metrics
     stt_result: Callable[[Utterance, Final], None] = lambda u, f: None  # metrics
     problem: Callable[[str], None] = lambda why: None  # mic or STT unavailable
+    # "Voice: cloud" / "Voice: local mode (offline)" / "Voice offline: ..." and the first-run
+    # privacy notice. None = shown through ``problem`` (the subtitle bar).
+    status: Callable[[str], None] | None = None
     is_dictation: Callable[[], bool] = lambda: False
     is_muted: Callable[[], bool] = lambda: False  # GRACE is talking
     dictation_cancelled: Callable[[], None] = lambda: None
 
 
 def build_voice_worker(
-    settings: Any, hooks: VoiceHooks, *, mic_on: Callable[[], bool], wake_word: str
+    settings: Any,
+    hooks: VoiceHooks,
+    *,
+    mic_on: Callable[[], bool],
+    wake_word: str,
+    quota: Any = None,
 ) -> tuple[VoiceWorker, list[str]]:
     """The real voice stack from settings. Returns (worker, lines describing it).
 
-    Raises VoiceUnavailable when Silero VAD or every STT engine is missing.
+    ``quota``: the app's QuotaGovernor (shared with the LLM router; grace/core/quota.py).
+    Raises VoiceUnavailable when Silero VAD is missing or no STT engine can ever run (no Groq
+    key and no local engine). Groq cooling down or out of quota at start is not fatal: voice
+    starts offline and comes back by itself.
     """
     from grace.input.audio import MicSource, SileroVad
-    from grace.input.stt import build_stt_router
+    from grace.input.stt import LOCAL_ENGINES, build_stt_router
+    from grace.input.stt.privacy import first_run_notice
     from grace.input.wakeword import load_wake_word
     from grace.models import MODELS_DIR, SILERO_VAD, resolve
 
@@ -706,9 +800,10 @@ def build_voice_worker(
     if not vad_path.is_file():
         raise VoiceUnavailable("Silero VAD model missing: run scripts/fetch_models.py")
     audio, ww = settings.audio, settings.wakeword
-    router = build_stt_router(settings)
+    status = hooks.status or hooks.problem
+    router = build_stt_router(settings, quota=quota, on_status=status)
     stt_desc = router.preload()
-    if router.engine_for(dictation=False) is None:
+    if router.engine_for(dictation=False) is None and not router.can_recover():
         raise VoiceUnavailable(stt_desc)
     detector, wake_desc = load_wake_word(
         ww.enabled,
@@ -733,13 +828,20 @@ def build_voice_worker(
 
         intents.submit(run)
 
+    def on_final(utt: Utterance, final: Final) -> None:
+        if utt.kind != "wake_check":  # a wake check may run locally on purpose: not a mode change
+            router.report(final.engine)
+        hooks.stt_result(utt, final)
+
     stt = SttWorker(
         router.engine_for,
         lambda: pipeline_ref[0],
         on_partial=(lambda u, t: hooks.partial(t)) if settings.stt.partials else lambda u, t: None,
         on_command=on_command,
-        on_final=hooks.stt_result,
-        on_unavailable=hooks.problem,
+        on_final=on_final,
+        on_unavailable=lambda why: router.report(None, why),
+        policy=UploadPolicy(settings.stt.upload_padding_ms, settings.stt.upload_min_speech_ms),
+        engine_for_wake=lambda: router.engine_for(dictation=False, wake_check=True),
     )
     pipeline = ListenPipeline(
         vad=SileroVad(vad_path),
@@ -773,9 +875,18 @@ def build_voice_worker(
         intents=intents,
         on_mic_error=lambda why: hooks.problem(f"Microphone unavailable: {why}"),
     )
+    possible = set(router.names_for(False)) | set(router.names_for(True))
+    local = bool(possible & LOCAL_ENGINES)
+    wake_uploads = mode == "text" and not local
+    if wake_uploads:
+        wake_desc += "; checked by cloud speech to text (no local engine installed)"
     lines = [
-        f"speech to text: {stt_desc} (language {settings.language})",
+        f"speech to text: {stt_desc} ({router.status}; language {settings.language})",
         f"wake word: {wake_desc}",
         f"end of speech after {audio.end_of_speech_ms} ms of silence",
     ]
+    notice = first_run_notice(uses_cloud=router.groq_key_set, wake_uploads=wake_uploads)
+    if notice:
+        lines.append(notice)
+        status(notice)
     return worker, lines
