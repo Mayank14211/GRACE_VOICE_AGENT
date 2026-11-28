@@ -3,6 +3,13 @@
     uv run python scripts/eval_stt.py                       # tests/audio/*.wav + transcripts.csv
     uv run python scripts/eval_stt.py --engines moonshine --save
     uv run python scripts/eval_stt.py --audio-dir data/synthetic_eval --label synthetic
+    uv run python scripts/eval_stt.py --engines groq,moonshine --save --section groq_vs_moonshine \
+        --label "team recordings, normal network"                 # M5b (cloud-first), then again
+                                                                  # on a phone hotspot
+
+Engines: groq (GROQ_API_KEY; real requests that count against the free tier in the app's own
+quota store, logs/quota.json), moonshine (extra [stt-local]), whisper_local (extra [stt-whisper]).
+Uploads go through the same guards as the app (speech plus 200 ms, nothing under 300 ms).
 
 Each recording is replayed in real time through the same path as the app: Silero VAD finds the
 utterance, the STT worker thread transcribes it while it "is spoken", and the clock runs from the
@@ -248,22 +255,26 @@ def replay(
     return out
 
 
-def make_engine(name: str, settings: Any) -> Any:
+def make_engine(name: str, settings: Any, quota: Any = None) -> Any:
+    """``quota``: the app's governor, so Groq requests made by the eval are counted (and refused
+    when the free tier is spent) exactly like the app's own."""
     from grace.input.stt import engine_factories
 
-    engine = engine_factories(settings)[name]()
+    engine = engine_factories(settings, quota=quota)[name]()
     engine.load()
     return engine
 
 
 def available_engines(settings: Any) -> list[str]:
-    from grace.input.stt import whisper_installed
+    from grace.input.stt import moonshine_installed, whisper_installed
 
-    names = ["moonshine"]
+    names = []
+    if settings.api_key("groq"):
+        names.append("groq")  # the default engine since S06b
+    if moonshine_installed():
+        names.append("moonshine")
     if whisper_installed():
         names.append("whisper_local")
-    if settings.api_key("groq"):
-        names.append("groq")
     return names
 
 
@@ -313,6 +324,18 @@ def markdown(reports: list[EngineReport], samples: list[Sample], label: str, set
             f"**Acceptance (M5):** Moonshine median end-of-speech → final text "
             f"{moon.eos_median:.0f} ms vs bar {BAR_MS:.0f} ms: **{verdict}** ({label}).",
         ]
+    groq = next((r for r in reports if r.engine == "groq"), None)
+    if groq is not None:
+        line = (
+            f"**Cloud-first (M5b):** Groq end-of-speech → final text median "
+            f"{groq.eos_median:.0f} ms, p90 {groq.eos_p90:.0f} ms ({label})"
+        )
+        if moon is not None:
+            line += (
+                f"; Moonshine on the same recordings median {moon.eos_median:.0f} ms, "
+                f"p90 {moon.eos_p90:.0f} ms"
+            )
+        body += ["", line + ". The team sets the pass bar from these numbers."]
     for r in reports:
         if r.worst:
             body += ["", f"Worst {r.engine} transcripts:", ""]
@@ -346,6 +369,14 @@ def main(argv: list[str] | None = None) -> int:
         print("Silero VAD missing: run scripts/fetch_models.py")
         return 1
     names = args.engines.split(",") if args.engines else available_engines(settings)
+    if not names:
+        print("No engine: set GROQ_API_KEY in .env or uv sync --extra stt-local.")
+        return 1
+    quota = None
+    if "groq" in names:
+        from grace.core.quota import build_governor
+
+        quota = build_governor(settings)  # the real counters: eval calls spend real free quota
     grammar = default_grammar()
     from grace.input.audio import load_wav
 
@@ -356,7 +387,7 @@ def main(argv: list[str] | None = None) -> int:
     reports = []
     for name in names:
         try:
-            engine = make_engine(name, settings)
+            engine = make_engine(name, settings, quota)
         except (SttError, KeyError) as exc:
             print(f"  {name}: skipped ({exc})")
             continue

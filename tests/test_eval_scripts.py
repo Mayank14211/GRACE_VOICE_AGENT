@@ -16,6 +16,7 @@ import eval_stt  # noqa: E402
 import results_md  # noqa: E402
 
 from grace.config import Settings  # noqa: E402
+from grace.input.stt import moonshine_installed  # noqa: E402
 from grace.intent.grammar import default_grammar  # noqa: E402
 
 
@@ -104,11 +105,50 @@ def test_bench_refuses_logical_thread_counts() -> None:
 # --------------------------------------------------------------------------- acceptance (manual)
 @pytest.mark.hardware
 @pytest.mark.skipif(not eval_stt.load_samples(eval_stt.AUDIO_DIR), reason="no team recordings yet")
+@pytest.mark.skipif(not moonshine_installed(), reason="needs uv sync --extra stt-local")
 def test_m5_acceptance_moonshine_median_under_500_ms(capsys: pytest.CaptureFixture[str]) -> None:
     """Real recordings, real time, base machine: median end of speech -> final text < 500 ms."""
     assert eval_stt.main(["--engines", "moonshine"]) == 0
     out = capsys.readouterr().out
     assert "**MET**" in out, out
+
+
+@pytest.mark.network
+@pytest.mark.hardware
+@pytest.mark.skipif(not eval_stt.load_samples(eval_stt.AUDIO_DIR), reason="no team recordings yet")
+def test_m5b_groq_and_moonshine_on_the_same_recordings(capsys: pytest.CaptureFixture[str]) -> None:
+    """Real recordings, real time, real Groq requests (they count against the free tier): Groq
+    median and p90 end of speech -> final text next to Moonshine. No bar yet: the team sets it."""
+    engines = ["groq"] + (["moonshine"] if moonshine_installed() else [])
+    assert eval_stt.main(["--engines", ",".join(engines)]) == 0
+    out = capsys.readouterr().out
+    assert "Cloud-first (M5b)" in out and "| groq |" in out, out
+
+
+def test_eval_stt_lists_groq_first_and_moonshine_only_with_the_extra(monkeypatch) -> None:
+    import grace.input.stt as stt
+
+    class WithKey(Settings):
+        def api_key(self, provider):  # type: ignore[override]
+            return "set" if provider == "groq" else None
+
+    monkeypatch.setattr(stt, "whisper_installed", lambda: False)
+    monkeypatch.setattr(stt, "moonshine_installed", lambda: False)
+    assert eval_stt.available_engines(WithKey()) == ["groq"]
+    assert eval_stt.available_engines(Settings()) == []
+    monkeypatch.setattr(stt, "moonshine_installed", lambda: True)
+    assert eval_stt.available_engines(WithKey()) == ["groq", "moonshine"]
+
+
+def test_eval_stt_report_puts_groq_next_to_moonshine() -> None:
+    def report(engine: str, median: float, p90: float):
+        return eval_stt.EngineReport(engine, 2, 0.0, 1.0, 1.0, median, p90, median + 500, 0, [])
+
+    text = eval_stt.markdown(
+        [report("groq", 420.0, 610.0), report("moonshine", 120.0, 180.0)], [], "x", Settings()
+    )
+    assert "Groq end-of-speech → final text median 420 ms, p90 610 ms (x)" in text
+    assert "Moonshine on the same recordings median 120 ms, p90 180 ms" in text
 
 
 def test_eval_router_requests_are_free_form_with_tools() -> None:
