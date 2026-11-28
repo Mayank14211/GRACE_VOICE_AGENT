@@ -24,6 +24,7 @@ import warnings
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:  # `python grace/doctor.py` only puts grace/ on sys.path
@@ -69,7 +70,6 @@ IMPORTS: tuple[tuple[str, str, bool], ...] = (
     ("grace.runtime", "grace (runtime)", False),
     ("onnxruntime", "onnxruntime", False),
     ("openwakeword", "openwakeword", False),
-    ("moonshine_voice", "moonshine-voice", False),
     ("grace.input.audio", "grace (audio + VAD)", False),
     ("grace.input.stt", "grace (speech to text)", False),
     ("grace.input.voice", "grace (voice pipeline)", False),
@@ -77,11 +77,14 @@ IMPORTS: tuple[tuple[str, str, bool], ...] = (
 
 
 # Model files: (relative path under models/, expected sha256), from grace/models.py.
-# scripts/fetch_models.py downloads them.
-def _required_models() -> tuple[tuple[str, str], ...]:
-    from grace.models import MODEL_FILES, REQUIRED_GROUPS
+# scripts/fetch_models.py downloads them. The Moonshine files only count when the optional
+# [stt-local] extra is installed (speech to text is cloud-first since S06b).
+def _required_models(stt_local: bool | None = None) -> tuple[tuple[str, str], ...]:
+    from grace.input.stt import moonshine_installed
+    from grace.models import MODEL_FILES, required_groups
 
-    return tuple((f.path, f.sha256) for f in MODEL_FILES if f.group in REQUIRED_GROUPS)
+    groups = required_groups(moonshine_installed() if stt_local is None else stt_local)
+    return tuple((f.path, f.sha256) for f in MODEL_FILES if f.group in groups)
 
 
 MODELS: tuple[tuple[str, str], ...] = _required_models()
@@ -641,15 +644,55 @@ def check_wakeword(settings_path: Path | None = None, env_path: Path | None = No
 
 
 def check_stt(settings_path: Path | None = None, env_path: Path | None = None) -> list[Result]:
-    """Moonshine (required, English): load + transcribe 1 s of silence. faster-whisper and Groq
-    are optional: not configured when their extra / key is missing."""
-    from grace.input.stt import whisper_installed
+    """Cloud-first (S06b): Groq Whisper is the default, Moonshine ([stt-local]) and
+    faster-whisper ([stt-whisper]) are optional. A missing extra is "not configured"; only having
+    no engine at all is a warning (gestures and hotkeys still work without voice)."""
+    from grace.input.stt import moonshine_installed, select_engines, whisper_installed
 
     settings = _load_settings_quietly(settings_path, env_path)
     if settings is None:
         return [Result("speech to text", NOT_CONFIGURED, "settings.yaml invalid (see above)")]
-    results = [_check_moonshine(settings.stt.moonshine_model)]
-    if not whisper_installed():
+    stt = settings.stt
+    key = bool(settings.api_key("groq"))
+    local, whisper = moonshine_installed(), whisper_installed()
+
+    def order(dictation: bool) -> str:
+        names = select_engines(
+            language=settings.language,
+            dictation=dictation,
+            engine=stt.engine,
+            groq_ready=key,
+            whisper_installed=whisper,
+            moonshine_installed=local,
+            demo_mode=settings.demo_mode,
+        )
+        return " -> ".join(names) or "none"
+
+    commands, dictation = order(False), order(True)
+    results = [
+        Result("stt engines", PASS, f"commands: {commands}; dictation: {dictation}")
+        if commands != "none"
+        else Result(
+            "stt engines",
+            WARN,
+            "no engine: set GROQ_API_KEY in .env or uv sync --extra stt-local "
+            "(gestures and hotkeys work without voice)",
+        )
+    ]
+    results.append(_check_groq_stt(settings) if key else Result(
+        "stt groq", NOT_CONFIGURED, "GROQ_API_KEY not set in .env (the default engine)"
+    ))  # fmt: skip
+    if not local:
+        results.append(
+            Result(
+                "stt moonshine",
+                NOT_CONFIGURED,
+                "not installed (optional offline engine: uv sync --extra stt-local)",
+            )
+        )
+    else:
+        results.append(_check_moonshine(stt.moonshine_model))
+    if not whisper:
         results.append(
             Result(
                 "stt faster-whisper",
@@ -660,7 +703,7 @@ def check_stt(settings_path: Path | None = None, env_path: Path | None = None) -
     else:
         from grace.models import MODELS_DIR, WHISPER_DIR
 
-        size = settings.stt.whisper_model
+        size = stt.whisper_model
         cached = (MODELS_DIR / WHISPER_DIR / f"models--Systran--faster-whisper-{size}").is_dir()
         results.append(
             Result("stt faster-whisper", PASS, f"installed, model '{size}' downloaded")
@@ -669,13 +712,29 @@ def check_stt(settings_path: Path | None = None, env_path: Path | None = None) -
                 "stt faster-whisper", WARN, f"model '{size}' not downloaded: {FETCH_HINT} --whisper"
             )
         )
-    key = settings.api_key("groq")
-    results.append(
-        Result("stt groq", PASS, f"GROQ_API_KEY set; {settings.stt.groq_model} (not called)")
-        if key
-        else Result("stt groq", NOT_CONFIGURED, "GROQ_API_KEY not set in .env (optional)")
-    )
     return results
+
+
+def _check_groq_stt(settings: Any) -> Result:
+    """Key set; today's use from the shared quota store (logs/quota.json). No request is made:
+    reachability is the "reach groq" check (model list, no quota spent)."""
+    from grace.core.quota import DEFAULT_STATE, QuotaGovernor, stt_limits, stt_quota_key
+
+    stt = settings.stt
+    key = stt_quota_key(settings)
+    limits = stt_limits(settings)
+    used = QuotaGovernor({key: limits}, state_path=DEFAULT_STATE).used(key)
+    parts = [f"GROQ_API_KEY set; {stt.groq_model} (not called)"]
+    if limits.rpd:
+        parts.append(f"today {used['rpd']:.0f} of {limits.rpd} requests")
+    if limits.audio_s_per_day:
+        parts.append(f"{used['asd']:.0f} of {limits.audio_s_per_day} audio s")
+    spent = (limits.rpd and used["rpd"] >= limits.rpd) or (
+        limits.audio_s_per_day and used["asd"] >= limits.audio_s_per_day
+    )
+    if spent:
+        return Result("stt groq", WARN, "; ".join(parts) + ": free tier spent until 00:00 UTC")
+    return Result("stt groq", PASS, "; ".join(parts))
 
 
 def _check_moonshine(arch: str) -> Result:
@@ -683,7 +742,8 @@ def _check_moonshine(arch: str) -> Result:
 
     name = f"stt moonshine {arch}"
     if not moonshine_dir(arch).is_dir():
-        return Result(name, FAIL, f"model missing: {FETCH_HINT}")
+        # The extra is installed but its model is not: the app falls back to Groq only.
+        return Result(name, WARN, f"model missing: {FETCH_HINT} --stt-local")
     import numpy as np
 
     from grace.input.audio import FRAME, frames

@@ -360,7 +360,7 @@ def _build_voice(
     )
     try:
         voice, lines = build_voice_worker(
-            settings, hooks, mic_on=lambda: state.mic_on, wake_word=agent.wake_word
+            settings, hooks, mic_on=lambda: state.mic_on, wake_word=agent.wake_word, quota=quota
         )
     except VoiceUnavailable as exc:
         print(f"Voice input unavailable: {exc}")

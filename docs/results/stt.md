@@ -3,6 +3,12 @@
 Gate (docs/PLAN.md section 8, S06): on the base machine (Intel i5-12450H), **median end of
 speech → final text under 500 ms with Moonshine** (the team may revise the bar).
 
+Since S06b (2026-11-26, cloud-first) Groq `whisper-large-v3-turbo` is the default engine and
+Moonshine the optional `[stt-local]` extra. Groq's latency is mostly network latency, so it is
+measured on the team's recordings on the normal network **and** on a phone hotspot, next to
+Moonshine on the same files (section "Cloud-first" below). There is no Groq bar yet: the team
+sets it from these numbers.
+
 - **End of speech** = the moment Silero VAD decides the utterance is over (after
   `audio.end_of_speech_ms` = 500 ms of silence) or the push-to-talk key is released.
 - **eos → final** = from that moment until the final text is ready. This is the gate number.
@@ -26,6 +32,33 @@ power, Windows power mode "Best performance".
 `scripts/record_audio.py --phrases tests/audio/phrases.txt --prefix <name>`, then runs
 `scripts/eval_stt.py --save` on the base machine. This section is replaced by the results.
 <!-- eval_stt:end -->
+
+## Cloud-first (M5b): Groq next to Moonshine, same recordings
+
+Run on the base machine with the extra installed (`uv sync --extra stt-local`), mains power.
+Each run sends every recording to Groq once (about 1 request and at least 10 billed audio-seconds
+per file; the app's own quota counters in `logs/quota.json` count them):
+
+    uv run python scripts/eval_stt.py --engines groq,moonshine --save \
+        --section groq_vs_moonshine --label "team recordings, normal network"
+    # switch the PC to a phone hotspot, then:
+    uv run python scripts/eval_stt.py --engines groq,moonshine --save \
+        --section groq_vs_moonshine_hotspot --label "team recordings, phone hotspot"
+
+<!-- groq_vs_moonshine:start -->
+### groq_vs_moonshine (normal network)
+
+**Not run yet** (needs the team's recordings in `tests/audio/` and the base machine). This
+section is replaced by the table: Groq median and p90 eos → final next to Moonshine.
+<!-- groq_vs_moonshine:end -->
+
+<!-- groq_vs_moonshine_hotspot:start -->
+### groq_vs_moonshine_hotspot (phone hotspot)
+
+**Not run yet.** Same recordings, same command, on a phone hotspot.
+<!-- groq_vs_moonshine_hotspot:end -->
+
+**Pass bar for Groq:** to be set by the team from the two tables above.
 
 ## Synthetic voices (first measurement, before the team's recordings)
 
@@ -104,3 +137,15 @@ Run 2026-11-23 18:30 on 12th Gen Intel(R) Core(TM) i5-12450H (Windows 11 build 2
 | 9 | Unplug / disable the mic while GRACE runs | "Microphone unavailable" on the overlay; hotkeys and gestures keep working | |
 | 10 | `uv run pytest -m hardware -k m5_acceptance` after recording | passes (median < 500 ms) | |
 | 11 | Wake-word model (after training, docs/wakeword.md): say it 20 times from 1 m | ≥ 19 detections; < 1 false wake in 10 min of normal talk | |
+
+### M5b (cloud-first) manual checks
+
+| # | Check | Expected | Result |
+|---|---|---|---|
+| 12 | `uv sync` (no extra), `uv run python -m grace doctor` | 0 FAIL; "stt moonshine: not installed (optional)"; no Moonshine model rows | |
+| 13 | `uv sync --extra stt-local`, `fetch_models.py --stt-local`, doctor | 0 FAIL; Moonshine loads, its 8 model hashes PASS | |
+| 14 | First start after a fresh clone (no `logs/privacy_notice.json`) | privacy notice once on the subtitle bar and console; not on the next start | |
+| 15 | With the extra: start a command, pull the network cable mid-command | the command still runs; "Voice: local mode (offline)"; cable back + 60 s → "Voice: cloud" | |
+| 16 | Without the extra: same | "Voice offline: gestures and hotkeys still work"; Ctrl+Alt+G gestures and every hotkey keep working | |
+| 17 | `demo_mode: true` in settings.yaml, with the extra, network off from the start | commands work on Moonshine; no network wait | |
+| 18 | The two `eval_stt` runs above (normal network, hotspot) | tables saved; team sets the Groq bar | |

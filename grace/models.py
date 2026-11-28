@@ -1,11 +1,13 @@
 """Model files GRACE downloads into models/ (git-ignored), with pinned URLs and sha256 hashes.
 
-    uv run python scripts/fetch_models.py            # VAD + wake-word features + Moonshine
-    uv run python scripts/fetch_models.py --whisper  # + faster-whisper (extra [stt-whisper])
+    uv run python scripts/fetch_models.py              # VAD + wake-word features
+    uv run python scripts/fetch_models.py --stt-local  # + Moonshine (extra [stt-local]; also
+                                                       #   fetched when the extra is installed)
+    uv run python scripts/fetch_models.py --whisper    # + faster-whisper (extra [stt-whisper])
 
-The doctor checks every file listed here. Paths are relative to ``MODELS_DIR``. The team's own
-wake-word model (wakeword.model_path) is trained per docs/wakeword.md and is not listed: its hash
-is whatever the team trains.
+The doctor checks the required files, and the Moonshine files only when [stt-local] is installed.
+Paths are relative to ``MODELS_DIR``. The team's own wake-word model (wakeword.model_path) is
+trained per docs/wakeword.md and is not listed: its hash is whatever the team trains.
 """
 
 from __future__ import annotations
@@ -101,8 +103,18 @@ MODEL_FILES: tuple[ModelFile, ...] = (
     ),
 )
 
-# Needed for voice to start at all (the demo wake-word model is optional).
-REQUIRED_GROUPS = ("vad", "wakeword", "moonshine:small-streaming")
+# Needed for voice to start at all (the demo wake-word model is optional). Speech to text is
+# cloud-first since S06b (Groq Whisper), so no STT model is required.
+REQUIRED_GROUPS = ("vad", "wakeword")
+# The optional local English engine (extra [stt-local], grace/input/stt/moonshine.py).
+STT_LOCAL_GROUPS = (_SMALL_GROUP,)
+
+
+def required_groups(stt_local: bool) -> tuple[str, ...]:
+    """Groups that must be on disk: the Moonshine files too when the [stt-local] extra is
+    installed (``grace.input.stt.moonshine_installed()``)."""
+    return REQUIRED_GROUPS + (STT_LOCAL_GROUPS if stt_local else ())
+
 
 WHISPER_DIR = "whisper"  # faster-whisper download_root (Hugging Face cache layout)
 
