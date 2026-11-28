@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from grace import doctor, models
+from grace.config import Settings, load_settings
 
 # Assembled at runtime so tests/test_no_secrets.py does not flag this file.
 SECRET = "sk" + "-THIS-MUST-NEVER-BE-PRINTED-1234567890"
@@ -84,11 +85,14 @@ def test_doctor_no_hardware_exits_zero(capsys: pytest.CaptureFixture[str]) -> No
 
 
 def test_doctor_checks_every_required_model_and_the_voice_stack() -> None:
-    from grace.models import MODEL_FILES, REQUIRED_GROUPS
+    from grace.input.stt import moonshine_installed
+    from grace.models import MODEL_FILES, required_groups
 
-    assert len(doctor.MODELS) == sum(f.group in REQUIRED_GROUPS for f in MODEL_FILES)
+    groups = required_groups(moonshine_installed())
+    assert len(doctor.MODELS) == sum(f.group in groups for f in MODEL_FILES)
     names = {module for module, _, _ in doctor.IMPORTS}
-    assert {"onnxruntime", "openwakeword", "moonshine_voice", "grace.input.voice"} <= names
+    assert {"onnxruntime", "openwakeword", "grace.input.voice"} <= names
+    assert "moonshine_voice" not in names  # optional since S06b: checked by check_stt
     assert not {"speech_recognition", "pyaudio"} & names  # removed in M5
     assert (
         doctor._short(
@@ -238,3 +242,44 @@ def test_reachability_uses_quota_free_calls(tmp_path: Path, monkeypatch) -> None
     assert results["reach cloudflare"].status == doctor.PASS
     assert results["reach tavily"].status == doctor.WARN
     assert groq not in repr(results)
+
+
+# --------------------------------------------------------------------------- speech to text (S06b)
+def test_moonshine_model_hashes_only_count_with_the_extra() -> None:
+    with_extra = {rel for rel, _ in doctor._required_models(stt_local=True)}
+    without = {rel for rel, _ in doctor._required_models(stt_local=False)}
+    assert any(rel.startswith("moonshine/") for rel in with_extra)
+    assert not any(rel.startswith("moonshine/") for rel in without)
+    assert without < with_extra
+
+
+def test_stt_check_without_the_extra_or_a_key(tmp_path: Path, monkeypatch) -> None:
+    import grace.input.stt as stt
+
+    monkeypatch.setattr(stt, "moonshine_installed", lambda: False)
+    monkeypatch.setattr(stt, "whisper_installed", lambda: False)
+    monkeypatch.setattr(doctor, "_load_settings_quietly", lambda *a: Settings())
+    results = {r.name: r for r in doctor.check_stt()}
+    assert results["stt moonshine"].status == doctor.NOT_CONFIGURED
+    assert "optional" in results["stt moonshine"].detail
+    assert results["stt groq"].status == doctor.NOT_CONFIGURED
+    assert results["stt engines"].status == doctor.WARN  # no engine at all: warn, never fail
+    assert not any(r.status == doctor.FAIL for r in results.values())
+
+
+def test_stt_check_with_a_key_shows_the_cloud_first_order(tmp_path: Path, monkeypatch) -> None:
+    import grace.core.quota as quota
+    import grace.input.stt as stt
+
+    env = tmp_path / ".env"
+    env.write_text("GROQ_API_KEY=" + "gsk" + "_" + "T3st" * 12 + "\n")
+    settings = load_settings(tmp_path / "none.yaml", env, environ={})
+    monkeypatch.setattr(stt, "moonshine_installed", lambda: False)
+    monkeypatch.setattr(stt, "whisper_installed", lambda: False)
+    monkeypatch.setattr(quota, "DEFAULT_STATE", tmp_path / "quota.json")
+    monkeypatch.setattr(doctor, "_load_settings_quietly", lambda *a: settings)
+    results = {r.name: r for r in doctor.check_stt()}
+    assert results["stt engines"].status == doctor.PASS
+    assert "commands: groq;" in results["stt engines"].detail
+    assert results["stt groq"].status == doctor.PASS
+    assert "0 of 2000 requests" in results["stt groq"].detail
