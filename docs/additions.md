@@ -61,8 +61,10 @@ Statuses: `Pending` (wanted, not scheduled) · `Planned (SNN)` (scheduled for a 
 
 ### A-003: Cloud-first router: no local LLM, our own tools, quota governor
 
-- **Date / status:** 2026-11-26 · Done (S07) for the router; the STT side (Groq Whisper default,
-  Moonshine as the optional `[stt-local]` extra) belongs to S06b.
+- **Date / status:** 2026-11-26 · Done (S07) for the router · Done (S06b) for the STT side:
+  Groq Whisper is the default engine, Moonshine is the optional `[stt-local]` extra, Whisper
+  limits and audio seconds are in the same governor, and there are upload guards and a privacy
+  notice (`grace/input/stt/`, `grace/input/voice.py`, `docs/privacy.md`).
 - **Request:** the team's architecture decision of 2026-11-26. No local LLM (llama.cpp / Gemma).
   The LLM chain is Groq gpt-oss-20b -> Gemini Flash-Lite -> OpenRouter `:free`. The router is a
   stateless orchestrator that keeps the dialogue itself. `web_search` (one free search API) and
@@ -82,8 +84,13 @@ Statuses: `Pending` (wanted, not scheduled) · `Planned (SNN)` (scheduled for a 
   - Registry actions named `notifications.*` (S09) appear in the `notifications` tool group
     automatically; don't add a separate tool.
   - Every cloud call goes through `grace/core/quota.py` (`allow` before, `record` after) and
-    has a timeout. S06b's `grace/input/stt/budget.py` must share this store (TODO in quota.py)
-    rather than build a second one.
+    has a timeout. There is exactly one governor: S06b extended it with audio-second counters
+    (`audio_s=`, per minute / hour / day) instead of building `grace/input/stt/budget.py`. Pass
+    the app's one `QuotaGovernor` instance (built in `grace/__main__.py`) to every new cloud
+    caller. A second instance on the same file would overwrite the other's counts.
+  - Speech audio goes to the cloud only through an engine with `uploads = True`, which gets the
+    upload guards in `grace/input/voice.py` (`upload_chunks`). A new cloud STT engine sets that
+    flag and is listed in `docs/privacy.md`.
   - Screen text and selected code never go to Gemini: use `Router.complete(...,
     exclude={"gemini"})`.
   - Nothing may store conversation state on a provider (no server-side ids); history lives in
