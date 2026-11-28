@@ -41,8 +41,6 @@ cycler==0.12.1
     # via matplotlib
 distro==1.9.0
     # via openai
-filelock==4.3.0
-    # via moonshine-voice
 flatbuffers==25.12.19
     # via
     #   mediapipe
@@ -59,8 +57,6 @@ google-auth==2.63.0
     # via
     #   google-api-core
     #   google-generativeai
-google-crc32c==1.9.0
-    # via moonshine-voice
 google-generativeai==0.3.1
     # via grace
 googleapis-common-protos==1.75.0
@@ -108,8 +104,6 @@ ml-dtypes==0.5.4
     # via
     #   jax
     #   jaxlib
-moonshine-voice==0.1.6
-    # via grace
 mouseinfo==0.1.3
     # via pyautogui
 mpmath==1.3.0
@@ -125,7 +119,6 @@ numpy==1.24.3
     #   matplotlib
     #   mediapipe
     #   ml-dtypes
-    #   moonshine-voice
     #   onnxruntime
     #   opencv-contrib-python
     #   scikit-learn
@@ -156,8 +149,6 @@ pillow==9.5.0
     #   matplotlib
     #   pyscreeze
     #   pytesseract
-platformdirs==4.14.8
-    # via moonshine-voice
 proto-plus==1.28.2
     # via
     #   google-ai-generativelanguage
@@ -972,7 +963,6 @@ pyyaml==6.0.4
 requests==2.34.2
     # via
     #   google-api-core
-    #   moonshine-voice
     #   openwakeword
 rubicon-objc==0.6.0 ; sys_platform == 'darwin'
     # via mouseinfo
@@ -997,7 +987,6 @@ sounddevice==0.4.6
     # via
     #   grace
     #   mediapipe
-    #   moonshine-voice
 soundfile==0.12.1
     # via grace
 sympy==1.14.0
@@ -1009,7 +998,6 @@ threadpoolctl==3.8.0
 tqdm==4.70.1
     # via
     #   google-generativeai
-    #   moonshine-voice
     #   openai
     #   openwakeword
 typing-extensions==4.16.0
