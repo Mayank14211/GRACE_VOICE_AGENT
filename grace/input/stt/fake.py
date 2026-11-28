@@ -4,7 +4,8 @@
 
 Each utterance consumes all its chunks, yields a partial every ``partial_every`` chunks (the
 growing prefix of the scripted text), then the next scripted text as the final. ``fail`` makes it
-raise SttError (to test fallbacks). ``utterances`` records the samples of every call.
+raise SttError (to test fallbacks). ``utterances`` records the samples of every call: for an
+``uploads=True`` fake (stands in for Groq) that is exactly what would have been sent.
 """
 
 from __future__ import annotations
@@ -27,8 +28,12 @@ class FakeStt:
         name: str = "fake",
         partial_every: int = 0,
         fail: str | None = None,
+        uploads: bool = False,
+        streaming: bool = True,
     ) -> None:
         self.name = name
+        self.uploads = uploads
+        self.streaming = streaming
         self._texts = texts if callable(texts) else list(texts or [])
         self.partial_every = partial_every
         self.fail = fail

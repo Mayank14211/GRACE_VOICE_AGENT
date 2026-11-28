@@ -1,9 +1,12 @@
-"""Groq ``whisper-large-v3-turbo`` over HTTPS: optional accelerator for Hindi / accurate dictation.
+"""Groq ``whisper-large-v3-turbo`` over HTTPS: the default engine since S06b (cloud-first).
 
-Free tier (docs/PLAN.md section 6): 20 requests/min, 2,000/day, 28,800 audio-seconds/day. Needs
-GROQ_API_KEY in .env. Every request has a timeout and a retry limit; HTTP 429 or any failure is an
-SttError so the caller falls back to faster-whisper (and cools Groq down). The key is only ever
-sent in the Authorization header; it never appears in messages or logs.
+Free tier (console.groq.com/docs/rate-limits, checked 2026-11-28): 20 requests/min, 2,000/day,
+7,200 audio-seconds/hour, 28,800/day, and every request is billed as at least 10 s of audio. Needs
+GROQ_API_KEY in .env. Every request has a timeout and a retry limit; HTTP 429, a spent quota or any
+failure is an SttError so the caller falls back to a local engine (and cools Groq down). With a
+quota governor (grace/core/quota.py) each request is checked before it is sent and counted after
+it is answered. The key is only ever sent in the Authorization header; it never appears in
+messages or logs.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ from typing import Any
 
 import numpy as np
 
+from grace.core.quota import Quota
 from grace.input.stt.base import SAMPLE_RATE, BatchEngine, SttError
 
 log = logging.getLogger(__name__)
@@ -34,6 +38,7 @@ def wav_bytes(audio: np.ndarray) -> bytes:
 class GroqStt(BatchEngine):
     name = "groq"
     streaming = False
+    uploads = True
 
     def __init__(
         self,
@@ -45,6 +50,9 @@ class GroqStt(BatchEngine):
         max_retries: int = 1,
         client: Any = None,
         sleep: Callable[[float], None] = time.sleep,
+        quota: Quota | None = None,
+        quota_key: str | None = None,
+        min_billed_s: float = 10.0,
     ) -> None:
         self._key = api_key
         self.model = model
@@ -53,6 +61,9 @@ class GroqStt(BatchEngine):
         self.max_retries = max_retries
         self._client = client
         self._sleep = sleep
+        self._quota = quota
+        self.quota_key = quota_key or f"groq:{model}"
+        self.min_billed_s = min_billed_s
 
     def load(self) -> None:
         if not self._key:
@@ -62,9 +73,16 @@ class GroqStt(BatchEngine):
 
             self._client = httpx.Client(timeout=self.timeout_s)
 
+    def billed_s(self, audio: np.ndarray) -> float:
+        """Audio seconds Groq counts for this request."""
+        return max(self.min_billed_s, len(audio) / SAMPLE_RATE)
+
     def _transcribe(self, audio: np.ndarray) -> str:
         import httpx
 
+        billed = self.billed_s(audio)
+        if self._quota is not None and not self._quota.allow(self.quota_key, audio_s=billed):
+            raise SttError("Groq free speech-to-text limit reached")
         data = {"model": self.model, "response_format": "json", "temperature": "0"}
         if self.language:
             data["language"] = self.language
@@ -84,6 +102,9 @@ class GroqStt(BatchEngine):
             except httpx.HTTPError as exc:
                 problem = f"{type(exc).__name__}"  # no URL/headers: nothing secret in the text
                 continue
+            if resp.status_code != 429 and self._quota is not None:
+                # Answered = counted by Groq (a 429 is refused before it counts).
+                self._quota.record(self.quota_key, audio_s=billed)
             if resp.status_code == 200:
                 try:
                     return str(resp.json().get("text", "")).strip()
